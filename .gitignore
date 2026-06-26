@@ -1,0 +1,18 @@
+# Build artifacts
+/terraform-provider-fcs
+/dist/
+.reviews/
+
+# Terraform run artifacts (examples / local testing)
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+!*.auto.tfvars.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
