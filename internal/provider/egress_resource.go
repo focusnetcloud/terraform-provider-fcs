@@ -5,13 +5,16 @@ package provider
 // /v1/environments/{id}/egress.
 //
 // Every spec attribute is immutable on the API (RequiresReplace); there is no
-// Update path. Create is NOT polled to "active" (a live egress is always
-// status="provisioning"; the reconcile is asynchronous and the contract
-// defines no active state). Destroy polls until the rule is gone.
+// Update path. Create retries the API's explicitly temporary HTTP 503 response
+// within the configured create timeout, but is NOT polled to "active" (a live
+// egress is always status="provisioning"; the contract defines no active
+// state). Destroy polls until the rule is gone.
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,7 +44,8 @@ import (
 // the ingress resource can reference it.
 var hostnamePrefixPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
-// defaultEgressCreateTimeout covers POST + (no poll).
+// defaultEgressCreateTimeout bounds POST retries for temporary HTTP 503
+// responses. Successful creates are not polled to another lifecycle state.
 const defaultEgressCreateTimeout = 5 * time.Minute
 
 var (
@@ -140,7 +144,7 @@ func (r *egressResource) Schema(ctx context.Context, _ resource.SchemaRequest, r
 			},
 			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
 				Create: true,
-				CreateDescription: fmt.Sprintf("How long to wait for the create call to return "+
+				CreateDescription: fmt.Sprintf("How long to retry temporary HTTP 503 responses from the create call "+
 					"(default %s). Accepts a duration string such as \"10m\".", defaultEgressCreateTimeout),
 				Delete: true,
 				DeleteDescription: fmt.Sprintf("How long to wait for the teardown to finish (GET returns 404 "+
@@ -263,11 +267,18 @@ func (r *egressResource) ValidateConfig(ctx context.Context, req resource.Valida
 func (r *egressResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var envID string
 	var clusterID, destinationCIDR, protocol, portRange types.String
+	var timeoutsVal timeouts.Value
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("environment_id"), &envID)...)
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("cluster_id"), &clusterID)...)
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("destination_cidr"), &destinationCIDR)...)
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("protocol"), &protocol)...)
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("port_range"), &portRange)...)
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("timeouts"), &timeoutsVal)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	createTimeout, diags := timeoutsVal.Create(ctx, defaultEgressCreateTimeout)
+	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -283,10 +294,14 @@ func (r *egressResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 
 	// 202 (newly created) and 200 (idempotent re-apply over (environment,
-	// cluster_id, destination_cidr, protocol, port_range)) are both success
-	// per contract. There is no poll-to-active (the record stays
-	// status=provisioning).
-	created, err := r.client.CreateEgress(ctx, envID, spec)
+	// cluster_id, destination_cidr, protocol, port_range)) are both success.
+	// The API may commit the row but return 503 while the gateway intent is not
+	// ready; repeating the same POST is therefore the contract's reconciliation
+	// mechanism. Permanent statuses still fail immediately. There is no
+	// poll-to-active after a successful POST (the record stays provisioning).
+	created, err := createEgressWithRetry(
+		ctx, r.client, envID, spec, r.pollInterval, createTimeout,
+	)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Could not create fcs_environment_egress",
@@ -298,6 +313,51 @@ func (r *egressResource) Create(ctx context.Context, req resource.CreateRequest,
 
 	resp.State.Raw = req.Plan.Raw
 	setEgressState(ctx, &resp.State, created, &resp.Diagnostics)
+}
+
+func createEgressWithRetry(
+	ctx context.Context,
+	c *client.Client,
+	envID string,
+	spec client.EgressSpec,
+	interval time.Duration,
+	timeout time.Duration,
+) (*client.Egress, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var lastErr error
+	for {
+		egress, err := c.CreateEgress(ctx, envID, spec)
+		if err == nil {
+			return egress, nil
+		}
+		var apiErr *client.APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusServiceUnavailable {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) && lastErr != nil {
+				return nil, fmt.Errorf(
+					"timed out after %s retrying egress create after temporary HTTP 503: %w",
+					timeout,
+					lastErr,
+				)
+			}
+			return nil, err
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, fmt.Errorf(
+					"timed out after %s retrying egress create after temporary HTTP 503: %w",
+					timeout,
+					lastErr,
+				)
+			}
+			return nil, ctx.Err()
+		case <-time.After(jitter(interval)):
+		}
+	}
 }
 
 func (r *egressResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {

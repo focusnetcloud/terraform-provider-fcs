@@ -37,5 +37,5 @@ An egress-allow rule for a cluster, applied through the central FCS NAT-GW egres
 
 Optional:
 
-- `create` (String) How long to wait for the create call to return (default 5m0s). Accepts a duration string such as "10m".
+- `create` (String) How long to retry temporary HTTP 503 responses from the create call (default 5m0s). Accepts a duration string such as "10m".
 - `delete` (String) How long to wait for the teardown to finish (GET returns 404 or status=destroyed; default 15m0s).
