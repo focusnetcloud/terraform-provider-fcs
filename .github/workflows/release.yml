@@ -30,6 +30,17 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Verify module files are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Run tests
+        run: go test ./... -timeout 10m
+
+      - name: Scan reachable Go vulnerabilities
+        run: make vuln
+
       - name: Import GPG key
         uses: crazy-max/ghaction-import-gpg@v6
         id: import_gpg

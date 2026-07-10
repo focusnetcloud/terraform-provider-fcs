@@ -30,7 +30,7 @@ Release and Terraform Registry publication are documented in
 
 ## Build
 
-Requires Go >= 1.26.
+Requires Go >= 1.26.5.
 
 ```sh
 make build      # go build ./...
@@ -150,7 +150,7 @@ resource "fcs_iaas_network" "web" {
 
 resource "fcs_vm" "web01" {
   environment_id = fcs_environment.prod.id
-  image          = "ubuntu-22.04"
+  image          = "coriolis-worker-ubuntu2204-qga"
   name           = "web01"
   nic_network    = "iaas"
   vdc_id         = fcs_iaas_vdc.prod.id
@@ -228,7 +228,7 @@ small:
 - namespace: fixed free-tier sizing
 - flex cluster: 1 vCPU, 2 GiB RAM, 20 GiB storage
 - business cluster: `size = "S"`
-- dedicated cluster: one control-plane node, 2 vCPU, 4 GiB RAM, 20 GiB PVC
+- dedicated cluster: one control-plane node, 4 vCPU, 8 GiB RAM, 50 GiB PVC
 - ingress and egress: attached to the business cluster, because flex/namespace
   do not own a dedicated workload CIDR for egress
 

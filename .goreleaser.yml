@@ -4,10 +4,6 @@
 # manifest that the registry ingests. Requires goreleaser >= v2.
 version: 2
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - env:
       - CGO_ENABLED=0

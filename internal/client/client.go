@@ -113,8 +113,17 @@ func New(endpoint, token string, opts ...Option) (*Client, error) {
 		return nil, errors.New("endpoint must not be empty")
 	}
 	u, err := url.Parse(endpoint)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("endpoint %q is not a valid http(s) URL", endpoint)
+	if err != nil {
+		return nil, errors.New("endpoint is not a valid http(s) URL")
+	}
+	if u.User != nil {
+		return nil, errors.New("endpoint must not contain embedded credentials")
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, errors.New("endpoint is not a valid http(s) URL")
+	}
+	if strings.ContainsAny(endpoint, "?#") {
+		return nil, errors.New("endpoint must not contain a query string or fragment")
 	}
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 		return nil, fmt.Errorf("endpoint %q uses insecure http; use https outside localhost/loopback tests", endpoint)

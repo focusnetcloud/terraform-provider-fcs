@@ -1,8 +1,9 @@
 GO ?= go
 
 TFPLUGINDOCS_VERSION ?= v0.25.0
+GOVULNCHECK_VERSION ?= v1.6.0
 
-.PHONY: default build install test testacc vet fmt fmtcheck docs
+.PHONY: default build install test testacc vet vuln fmt fmtcheck docs
 
 default: build
 
@@ -23,6 +24,9 @@ testacc:
 
 vet:
 	$(GO) vet ./...
+
+vuln:
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 fmt:
 	gofmt -w .

@@ -50,7 +50,7 @@ variable "network_cidr" {
 variable "vm_image" {
   type        = string
   description = "Image catalog name for the VM. Check data.fcs_images.catalog for tenant-specific availability."
-  default     = "ubuntu-22.04"
+  default     = "coriolis-worker-ubuntu2204-qga"
 }
 
 data "fcs_images" "catalog" {}

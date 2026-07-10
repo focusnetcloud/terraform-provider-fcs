@@ -74,7 +74,7 @@ func (r *clusterKubeconfigEphemeralResource) Schema(_ context.Context, _ ephemer
 			},
 			"cluster_id": schema.StringAttribute{
 				Required:    true,
-				Description: "ID of the cluster (fcs_business_cluster / fcs_flex_cluster / fcs_namespace).",
+				Description: "ID of the cluster (fcs_business_cluster / fcs_flex_cluster / fcs_dedicated_cluster). Shared namespaces have no independent Kubernetes API server.",
 				Validators: []validator.String{
 					stringvalidator.LengthAtLeast(1),
 				},

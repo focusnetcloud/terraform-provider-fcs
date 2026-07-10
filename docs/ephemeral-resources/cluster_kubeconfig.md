@@ -20,7 +20,7 @@ Mints cluster-scoped credentials for a cluster in an environment. This is an **e
 
 ### Required
 
-- `cluster_id` (String) ID of the cluster (fcs_business_cluster / fcs_flex_cluster / fcs_namespace).
+- `cluster_id` (String) ID of the cluster (fcs_business_cluster / fcs_flex_cluster / fcs_dedicated_cluster). Shared namespaces have no independent Kubernetes API server.
 - `environment_id` (String) ID of the fcs_environment hosting the cluster.
 
 ### Read-Only

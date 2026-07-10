@@ -23,7 +23,9 @@
 //     ClusterReadyAfterGETs GETs (or -> error with FailClusterProvisioning)
 //   - DELETE .../clusters/{cid}: 202 -> status destroyed; the row stays
 //     readable for ClusterGoneAfterGETs GETs, then -> 404
-//   - POST .../clusters/{cid}/kubeconfig: 201 + short-lived credentials
+//   - POST .../clusters/{cid}/kubeconfig: 201 + short-lived credentials for
+//     flex/business/dedicated; shared namespaces have no independent API
+//     server and return 409 (matching the live contract)
 //
 // VM sub-API:
 //   - POST .../vms: image must be in the catalog -> else 422; idempotent
@@ -461,6 +463,7 @@ func New(token string) *Server {
 		QuotaMaxPublicIPs:         2,
 		Images: []Image{
 			{Name: "ubuntu-22.04", DisplayName: "Ubuntu 22.04 LTS", Source: "catalog"},
+			{Name: "coriolis-worker-ubuntu2204-qga", DisplayName: "Ubuntu 22.04 LTS (QGA)", Source: "catalog"},
 			{Name: "lab-base", Source: "env"},
 		},
 		ConsoleLog: "[    0.000000] Linux version 6.8.0 (mock)\n" +
@@ -987,6 +990,15 @@ func (s *Server) handleClusterKubeconfigLocked(w http.ResponseWriter, r *http.Re
 	cl, ok := s.clusters[clusterID]
 	if !ok || cl.envID != env.ID || cl.deleted {
 		writeError(w, http.StatusNotFound, "cluster not found", "NotFound")
+		return
+	}
+	if cl.Kind == "namespace" {
+		writeError(
+			w,
+			http.StatusConflict,
+			"namespace clusters have no independent Kubernetes API server",
+			"KubeconfigUnsupported",
+		)
 		return
 	}
 	saToken := "sa." + newUUID()

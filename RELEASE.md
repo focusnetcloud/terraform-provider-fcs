@@ -70,6 +70,7 @@ go test ./...
 TF_ACC=1 go test ./internal/provider -v -timeout 10m
 make build
 make vet
+make vuln
 make fmtcheck
 terraform fmt -check -recursive examples
 make docs

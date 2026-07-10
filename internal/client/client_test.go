@@ -32,6 +32,11 @@ func TestNewValidation(t *testing.T) {
 		{"empty endpoint", "", testToken},
 		{"invalid scheme", "ftp://api.example.com", testToken},
 		{"no host", "https://", testToken},
+		{"embedded credentials", "https://user:password@api.example.com", testToken},
+		{"bare query delimiter", "https://api.example.com?", testToken},
+		{"query string", "https://api.example.com?debug=true", testToken},
+		{"bare fragment delimiter", "https://api.example.com#", testToken},
+		{"fragment", "https://api.example.com#fragment", testToken},
 		{"empty token", "https://api.example.com", ""},
 		{"whitespace token", "https://api.example.com", "   "},
 	}
@@ -41,6 +46,16 @@ func TestNewValidation(t *testing.T) {
 				t.Fatalf("expected error for endpoint=%q token=%q", tc.endpoint, tc.token)
 			}
 		})
+	}
+}
+
+func TestNewNeverEchoesEmbeddedCredentials(t *testing.T) {
+	_, err := client.New("ftp://user:super-secret@api.example.com", testToken)
+	if err == nil {
+		t.Fatal("expected embedded credentials to be rejected")
+	}
+	if strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("validation error leaked endpoint credentials: %q", err)
 	}
 }
 

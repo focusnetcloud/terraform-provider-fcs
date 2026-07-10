@@ -6,6 +6,8 @@ package client_test
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -394,6 +396,29 @@ func TestMintKubeconfigWithoutSAToken(t *testing.T) {
 	}
 	if creds.Kubeconfig == "" {
 		t.Fatal("kubeconfig must still be returned")
+	}
+}
+
+func TestMintKubeconfigNamespaceUnsupported(t *testing.T) {
+	srv := mockapi.New(testToken)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL, testToken)
+	envID := newEnvForClusters(t, c, "lab-cl-kc-namespace")
+
+	created, err := c.CreateCluster(context.Background(), envID, client.ClusterSpec{Kind: "namespace"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, err = c.MintKubeconfig(context.Background(), envID, created.ID)
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
+		t.Fatalf("expected APIError 409 for a shared namespace, got %v", err)
+	}
+	if apiErr.Reason != "KubeconfigUnsupported" {
+		t.Fatalf("expected reason KubeconfigUnsupported, got %q", apiErr.Reason)
+	}
+	if srv.KubeconfigMintCount() != 0 {
+		t.Fatal("unsupported namespace request must not mint credentials")
 	}
 }
 

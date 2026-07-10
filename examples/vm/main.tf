@@ -50,7 +50,7 @@ resource "fcs_environment" "attendee" {
 resource "fcs_vm" "target" {
   for_each            = toset(var.attendees)
   environment_id      = fcs_environment.attendee[each.key].id
-  image               = "ubuntu-22.04" # fcs_images data source / tenant catalog
+  image               = "coriolis-worker-ubuntu2204-qga" # fcs_images data source / tenant catalog
   cpu_cores           = 2
   memory_gb           = 4
   nic_network         = "tenant" # persistent tenant VLAN NAD; server picks NAD + IP

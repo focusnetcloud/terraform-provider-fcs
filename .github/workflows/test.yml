@@ -27,8 +27,13 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
       - run: go mod download
+      - name: Verify module files are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
       - run: go build -v ./...
       - run: go vet ./...
+      - run: make vuln
       - name: gofmt
         run: |
           out="$(gofmt -l .)"
@@ -46,6 +51,9 @@ jobs:
           - '1.10.*'
           - '1.11.*'
           - '1.12.*'
+          - '1.13.*'
+          - '1.14.*'
+          - '1.15.*'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
