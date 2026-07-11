@@ -150,7 +150,7 @@ resource "fcs_iaas_network" "web" {
 
 resource "fcs_vm" "web01" {
   environment_id = fcs_environment.prod.id
-  image          = "coriolis-worker-ubuntu2204-qga"
+  image          = "worker-ubuntu2204-qga"
   name           = "web01"
   nic_network    = "iaas"
   vdc_id         = fcs_iaas_vdc.prod.id
@@ -224,7 +224,7 @@ small:
 
 - VM: 1 vCPU, 2 GiB RAM, 20 GiB disk
 - VM image: configurable via `vm_image`; default matches the current catalog
-  smoke image `coriolis-worker-ubuntu2204-qga`
+  smoke image `worker-ubuntu2204-qga`
 - namespace: fixed free-tier sizing
 - flex cluster: 1 vCPU, 2 GiB RAM, 20 GiB storage
 - business cluster: `size = "S"`
