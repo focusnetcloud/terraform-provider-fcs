@@ -116,9 +116,25 @@ type Server struct {
 	ClusterGoneAfterGETs    int  // GETs returning offboarding after DELETE before 404 (default 1)
 	FailClusterProvisioning bool // provisioning -> error instead of active
 	OmitSAToken             bool // kubeconfig endpoint returns no sa_token
+	// OmitClusterSizing simulates API versions that did not return sizing
+	// fields in cluster responses.
+	OmitClusterSizing bool
 	// ClusterProvisioningDiagnostics, when set, is returned on every cluster
 	// object and is useful for testing Terraform diagnostics on async failures.
 	ClusterProvisioningDiagnostics string
+	// ClusterResizeProvisioningDiagnostics replaces the diagnostics text when
+	// PATCH starts a resize, simulating volatile provider handoff details.
+	ClusterResizeProvisioningDiagnostics string
+	// ClusterResizeOmitDesiredSpec and the response overrides exercise provider
+	// fail-closed guards without corrupting the mock's stored cluster identity.
+	ClusterResizeOmitDesiredSpec    bool
+	ClusterResizeInvalidDesiredSpec bool
+	ClusterResizeResponseID         string
+	ClusterResizeResponseKind       string
+	ClusterGetOmitDesiredSpec       bool
+	ClusterGetInvalidDesiredSpec    bool
+	ClusterGetResponseID            string
+	ClusterGetResponseKind          string
 
 	// DedicatedClusterReadyAfterGETs overrides ClusterReadyAfterGETs for
 	// kind=dedicated clusters only (a real RKE2 cluster provisions slower than
@@ -175,6 +191,7 @@ type Server struct {
 	iaasVdcs        map[string]*iaasVdc     // by id
 	iaasNetworks    map[string]*iaasNetwork // by id
 	kubeconfigMints int                     // successful kubeconfig mints
+	clusterPatches  int                     // cluster PATCH requests
 	nextPublishedID int64
 	nextIaasVdcSeq  int64
 }
@@ -204,13 +221,24 @@ type environmentSpec struct {
 }
 
 type cluster struct {
-	ID                      string `json:"id"`
-	Kind                    string `json:"kind"`
-	Status                  string `json:"status"`
-	APIServerURL            string `json:"api_server_url"`
-	ClusterCIDR             string `json:"cluster_cidr"`
-	ServiceCIDR             string `json:"service_cidr"`
-	ProvisioningDiagnostics string `json:"provisioning_diagnostics"`
+	ID                      string         `json:"id"`
+	Kind                    string         `json:"kind"`
+	Status                  string         `json:"status"`
+	APIServerURL            string         `json:"api_server_url"`
+	ClusterCIDR             string         `json:"cluster_cidr"`
+	ServiceCIDR             string         `json:"service_cidr"`
+	ProvisioningDiagnostics string         `json:"provisioning_diagnostics"`
+	VCPU                    int64          `json:"vcpu,omitempty"`
+	RAMGB                   int64          `json:"ram_gb,omitempty"`
+	StorageGB               int64          `json:"storage_gb,omitempty"`
+	CPNodes                 int64          `json:"cp_nodes,omitempty"`
+	CPVcpu                  int64          `json:"cp_vcpu,omitempty"`
+	CPRamGB                 int64          `json:"cp_ram_gb,omitempty"`
+	WorkerNodes             int64          `json:"worker_nodes"`
+	WorkerVcpu              int64          `json:"worker_vcpu"`
+	WorkerRamGB             int64          `json:"worker_ram_gb"`
+	PVCStorageGB            int64          `json:"pvc_storage_gb,omitempty"`
+	DesiredSpec             *clusterSizing `json:"desired_spec,omitempty"`
 
 	envID    string
 	spec     clusterSpec
@@ -218,6 +246,19 @@ type cluster struct {
 	goneGETs int    // GETs since DELETE
 	publicIP string // business clusters get an EIP once active (ingress precondition)
 	deleted  bool
+}
+
+type clusterSizing struct {
+	VCPU         int64 `json:"vcpu"`
+	RAMGB        int64 `json:"ram_gb"`
+	StorageGB    int64 `json:"storage_gb"`
+	CPNodes      int64 `json:"cp_nodes"`
+	CPVcpu       int64 `json:"cp_vcpu"`
+	CPRamGB      int64 `json:"cp_ram_gb"`
+	WorkerNodes  int64 `json:"worker_nodes"`
+	WorkerVcpu   int64 `json:"worker_vcpu"`
+	WorkerRamGB  int64 `json:"worker_ram_gb"`
+	PVCStorageGB int64 `json:"pvc_storage_gb"`
 }
 
 type clusterSpec struct {
@@ -238,6 +279,20 @@ type clusterSpec struct {
 	WorkerRamGB  int64  `json:"worker_ram_gb"`
 	PVCStorageGB int64  `json:"pvc_storage_gb"`
 	RKE2Version  string `json:"rke2_version"`
+}
+
+type clusterResizeSpec struct {
+	Size         string `json:"size"`
+	VCPU         *int64 `json:"vcpu"`
+	RAMGB        *int64 `json:"ram_gb"`
+	StorageGB    *int64 `json:"storage_gb"`
+	CPNodes      *int64 `json:"cp_nodes"`
+	CPVcpu       *int64 `json:"cp_vcpu"`
+	CPRamGB      *int64 `json:"cp_ram_gb"`
+	WorkerNodes  *int64 `json:"worker_nodes"`
+	WorkerVcpu   *int64 `json:"worker_vcpu"`
+	WorkerRamGB  *int64 `json:"worker_ram_gb"`
+	PVCStorageGB *int64 `json:"pvc_storage_gb"`
 }
 
 // hostnamePrefixPattern mirrors the server-side hostname_prefix validation:
@@ -685,6 +740,13 @@ func (s *Server) ClusterCount() int {
 	return n
 }
 
+// ClusterPatchCount returns the number of cluster PATCH requests received.
+func (s *Server) ClusterPatchCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clusterPatches
+}
+
 // dropClustersOfLocked removes all clusters of an environment (cascade on
 // environment teardown). Caller must hold s.mu.
 func (s *Server) dropClustersOfLocked(envID string) {
@@ -896,7 +958,7 @@ func (s *Server) handleClusterCollectionLocked(w http.ResponseWriter, r *http.Re
 		// Idempotent re-apply over (environment, kind): the existing
 		// non-terminal cluster is returned even when the spec differs
 		// (server semantics; 409 is reserved for real quota cases).
-		writeJSON(w, http.StatusOK, cl)
+		s.writeClusterJSONLocked(w, http.StatusOK, cl)
 		return
 	}
 	cl := &cluster{
@@ -909,9 +971,10 @@ func (s *Server) handleClusterCollectionLocked(w http.ResponseWriter, r *http.Re
 		envID:                   env.ID,
 		spec:                    spec,
 	}
+	applyClusterCreateSizing(cl, spec)
 	cl.APIServerURL = fmt.Sprintf("https://%s.k8s.focusnet.de:6443", cl.ID[:8])
 	s.clusters[cl.ID] = cl
-	writeJSON(w, http.StatusAccepted, cl)
+	s.writeClusterJSONLocked(w, http.StatusAccepted, cl)
 }
 
 // clusterReadyAfterGETsFor returns the provisioning->active GET threshold for
@@ -940,10 +1003,10 @@ func (s *Server) handleClusterItemLocked(w http.ResponseWriter, r *http.Request,
 				writeError(w, http.StatusNotFound, "cluster not found", "NotFound")
 				return
 			}
-			writeJSON(w, http.StatusOK, cl) // status=destroyed
+			s.writeClusterJSONLocked(w, http.StatusOK, cl) // status=destroyed
 			return
 		}
-		if cl.Status == "provisioning" {
+		if cl.Status == "provisioning" || cl.Status == "resizing" {
 			cl.getCount++
 			if cl.getCount >= s.clusterReadyAfterGETsFor(cl.Kind) {
 				if s.FailClusterProvisioning {
@@ -966,7 +1029,55 @@ func (s *Server) handleClusterItemLocked(w http.ResponseWriter, r *http.Request,
 				}
 			}
 		}
-		writeJSON(w, http.StatusOK, cl)
+		s.writeClusterGetJSONLocked(w, http.StatusOK, cl)
+	case http.MethodPatch:
+		s.clusterPatches++
+		if cl.deleted || cl.Kind == "namespace" {
+			writeError(w, http.StatusConflict, "cluster cannot be resized", "ResizeUnsupported")
+			return
+		}
+		var spec clusterResizeSpec
+		if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid cluster resize spec", "BadRequest")
+			return
+		}
+		if clusterResizeSpecEmpty(spec) {
+			writeError(w, http.StatusBadRequest, "cluster resize spec must not be empty", "EmptyResize")
+			return
+		}
+		candidate := *cl
+		applyClusterResizeSizing(&candidate, spec)
+		if candidate.StorageGB < cl.StorageGB || candidate.PVCStorageGB < cl.PVCStorageGB {
+			writeError(w, http.StatusConflict, "cluster storage cannot be reduced", "StorageShrinkNotSupported")
+			return
+		}
+		applyClusterResizeSizing(cl, spec)
+		cl.DesiredSpec = clusterSizingSnapshot(cl)
+		if s.ClusterResizeProvisioningDiagnostics != "" {
+			cl.ProvisioningDiagnostics = s.ClusterResizeProvisioningDiagnostics
+		}
+		cl.Status = "resizing"
+		cl.getCount = 0
+		response := *cl
+		if s.ClusterResizeOmitDesiredSpec {
+			response.DesiredSpec = nil
+		}
+		if s.ClusterResizeInvalidDesiredSpec && response.DesiredSpec != nil {
+			invalid := *response.DesiredSpec
+			if response.Kind == "dedicated" {
+				invalid.CPNodes = 0
+			} else {
+				invalid.VCPU = 0
+			}
+			response.DesiredSpec = &invalid
+		}
+		if s.ClusterResizeResponseID != "" {
+			response.ID = s.ClusterResizeResponseID
+		}
+		if s.ClusterResizeResponseKind != "" {
+			response.Kind = s.ClusterResizeResponseKind
+		}
+		s.writeClusterJSONLocked(w, http.StatusAccepted, &response)
 	case http.MethodDelete:
 		// Idempotent: repeated DELETE on a destroyed cluster is still a 202.
 		// The row stays readable as destroyed for ClusterGoneAfterGETs GETs.
@@ -979,6 +1090,117 @@ func (s *Server) handleClusterItemLocked(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusAccepted)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) writeClusterJSONLocked(w http.ResponseWriter, status int, cl *cluster) {
+	if !s.OmitClusterSizing {
+		writeJSON(w, status, cl)
+		return
+	}
+	response := *cl
+	response.VCPU = 0
+	response.RAMGB = 0
+	response.StorageGB = 0
+	response.CPNodes = 0
+	response.CPVcpu = 0
+	response.CPRamGB = 0
+	response.WorkerNodes = 0
+	response.WorkerVcpu = 0
+	response.WorkerRamGB = 0
+	response.PVCStorageGB = 0
+	response.DesiredSpec = nil
+	writeJSON(w, status, &response)
+}
+
+func (s *Server) writeClusterGetJSONLocked(w http.ResponseWriter, status int, cl *cluster) {
+	response := *cl
+	if s.ClusterGetOmitDesiredSpec {
+		response.DesiredSpec = nil
+	}
+	if s.ClusterGetInvalidDesiredSpec && response.DesiredSpec != nil {
+		invalid := *response.DesiredSpec
+		if response.Kind == "dedicated" {
+			invalid.CPNodes = 0
+		} else {
+			invalid.VCPU = 0
+		}
+		response.DesiredSpec = &invalid
+	}
+	if s.ClusterGetResponseID != "" {
+		response.ID = s.ClusterGetResponseID
+	}
+	if s.ClusterGetResponseKind != "" {
+		response.Kind = s.ClusterGetResponseKind
+	}
+	s.writeClusterJSONLocked(w, status, &response)
+}
+
+func applyClusterCreateSizing(cl *cluster, spec clusterSpec) {
+	if cl.Kind == "dedicated" {
+		cl.CPNodes = spec.CPNodes
+		cl.CPVcpu = spec.CPVcpu
+		cl.CPRamGB = spec.CPRamGB
+		cl.WorkerNodes = spec.WorkerNodes
+		cl.WorkerVcpu = spec.WorkerVcpu
+		cl.WorkerRamGB = spec.WorkerRamGB
+		cl.PVCStorageGB = spec.PVCStorageGB
+		return
+	}
+	if cl.Kind != "business" && cl.Kind != "flex" {
+		return
+	}
+	if spec.VCPU > 0 || spec.RAMGB > 0 {
+		cl.VCPU = spec.VCPU
+		cl.RAMGB = spec.RAMGB
+		cl.StorageGB = spec.StorageGB
+		return
+	}
+	applyClusterPresetSizing(cl, spec.Size)
+}
+
+func applyClusterPresetSizing(cl *cluster, size string) {
+	if size == "" {
+		size = "S"
+	}
+	compute := map[string][2]int64{"S": {4, 8}, "M": {8, 16}, "L": {16, 32}}
+	storage := map[string]map[string]int64{
+		"business": {"S": 100, "M": 250, "L": 500},
+		"flex":     {"S": 50, "M": 100, "L": 250},
+	}
+	cl.VCPU = compute[size][0]
+	cl.RAMGB = compute[size][1]
+	cl.StorageGB = storage[cl.Kind][size]
+}
+
+func applyClusterResizeSizing(cl *cluster, spec clusterResizeSpec) {
+	if spec.Size != "" {
+		applyClusterPresetSizing(cl, spec.Size)
+	}
+	for value, target := range map[*int64]*int64{
+		spec.VCPU: &cl.VCPU, spec.RAMGB: &cl.RAMGB, spec.StorageGB: &cl.StorageGB,
+		spec.CPNodes: &cl.CPNodes, spec.CPVcpu: &cl.CPVcpu, spec.CPRamGB: &cl.CPRamGB,
+		spec.WorkerNodes: &cl.WorkerNodes, spec.WorkerVcpu: &cl.WorkerVcpu,
+		spec.WorkerRamGB: &cl.WorkerRamGB, spec.PVCStorageGB: &cl.PVCStorageGB,
+	} {
+		if value != nil {
+			*target = *value
+		}
+	}
+}
+
+func clusterResizeSpecEmpty(spec clusterResizeSpec) bool {
+	return spec.Size == "" && spec.VCPU == nil && spec.RAMGB == nil && spec.StorageGB == nil &&
+		spec.CPNodes == nil && spec.CPVcpu == nil && spec.CPRamGB == nil &&
+		spec.WorkerNodes == nil && spec.WorkerVcpu == nil && spec.WorkerRamGB == nil && spec.PVCStorageGB == nil
+}
+
+func clusterSizingSnapshot(cl *cluster) *clusterSizing {
+	return &clusterSizing{
+		VCPU: cl.VCPU, RAMGB: cl.RAMGB, StorageGB: cl.StorageGB,
+		CPNodes: cl.CPNodes, CPVcpu: cl.CPVcpu, CPRamGB: cl.CPRamGB,
+		WorkerNodes: cl.WorkerNodes, WorkerVcpu: cl.WorkerVcpu,
+		WorkerRamGB: cl.WorkerRamGB, PVCStorageGB: cl.PVCStorageGB,
 	}
 }
 

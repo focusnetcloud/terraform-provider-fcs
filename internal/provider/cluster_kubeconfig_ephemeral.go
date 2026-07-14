@@ -5,10 +5,10 @@ package provider
 //
 // It is deliberately an EPHEMERAL RESOURCE (not a data source): ephemeral
 // values are never persisted to the Terraform plan or state, so the minted
-// kubeconfig/sa_token cannot leak through a state file. This matters because
-// the server may return long-lived kubeconfig material; `expires_at` is
-// advisory until short-lived token issuance is available for every backend.
-// Each Open mints fresh credentials; they are sensitive and never logged.
+// kubeconfig/sa_token cannot leak through a state file. Each Open requests
+// fresh credentials; they are sensitive, must not be cached or reused, and are
+// never logged. The server-declared expiry may be advisory depending on the
+// backend.
 
 import (
 	"context"
@@ -59,11 +59,10 @@ func (r *clusterKubeconfigEphemeralResource) Schema(_ context.Context, _ ephemer
 			"plan or state**. Use the result only as an ephemeral input, e.g. for `kubernetes`/" +
 			"`helm` provider configuration blocks (provider configurations accept ephemeral " +
 			"values).\n\n" +
-			"**Security note:** depending on backend capabilities, minted credentials may " +
-			"remain valid beyond the current Terraform run. Treat `expires_at` as an " +
-			"advisory timestamp unless your FCS tenant explicitly documents enforced " +
-			"credential expiry. The ephemeral, never-persisted delivery path is mandatory " +
-			"for these credentials.",
+			"**Security note:** each Open operation requests fresh credentials. Do not copy, " +
+			"cache, or reuse an earlier kubeconfig or token. Credentials may remain valid beyond " +
+			"the current Terraform run; treat `expires_at` as advisory unless your FCS tenant " +
+			"documents enforced expiry. The ephemeral, never-persisted delivery path is mandatory.",
 		Attributes: map[string]schema.Attribute{
 			"environment_id": schema.StringAttribute{
 				Required:    true,
@@ -92,12 +91,12 @@ func (r *clusterKubeconfigEphemeralResource) Schema(_ context.Context, _ ephemer
 			"sa_token": schema.StringAttribute{
 				Computed:  true,
 				Sensitive: true,
-				MarkdownDescription: "Service-account bearer token. Sensitive and ephemeral; " +
-					"null when the backend does not return one.",
+				MarkdownDescription: "Bearer token returned separately by the backend. Sensitive " +
+					"and ephemeral; null when the backend does not return a separate token value.",
 			},
 			"expires_at": schema.StringAttribute{
 				Computed: true,
-				Description: "Expiry timestamp of the minted credentials (RFC 3339). " +
+				Description: "Server-declared expiry timestamp of the minted credentials (RFC 3339). " +
 					"May be advisory depending on backend capabilities.",
 			},
 		},

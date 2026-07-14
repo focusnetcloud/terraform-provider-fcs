@@ -5,9 +5,11 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,6 +48,147 @@ func TestWaitForClusterActiveSuccess(t *testing.T) {
 	}
 	if cl.Status != "active" {
 		t.Fatalf("expected active, got %q", cl.Status)
+	}
+}
+
+func TestClusterMatchesResizeUsesConfiguredDedicatedKind(t *testing.T) {
+	target := client.ClusterSizing{
+		CPNodes: 3, CPVcpu: 4, CPRamGB: 8,
+		WorkerNodes: 0, WorkerVcpu: 0, WorkerRamGB: 0, PVCStorageGB: 100,
+	}
+	cluster := &client.Cluster{
+		Kind: "", CPNodes: 3, CPVcpu: 4, CPRamGB: 8,
+		WorkerNodes: 0, WorkerVcpu: 0, WorkerRamGB: 0, PVCStorageGB: 100,
+	}
+	if !clusterMatchesResize(cluster, target, true) {
+		t.Fatal("dedicated convergence must not depend on kind being present in the API response")
+	}
+	cluster.CPVcpu = 2
+	if clusterMatchesResize(cluster, target, true) {
+		t.Fatal("stale dedicated sizing must not be accepted as converged")
+	}
+}
+
+func TestWaitForClusterResizedRejectsStaleActiveSizing(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		request := requests.Add(1)
+		vcpu := 4
+		if request > 1 {
+			vcpu = 8
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":"cluster-race","kind":"business","status":"active","vcpu":%d,"ram_gb":16,"storage_gb":250}`, vcpu)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+
+	cluster, err := waitForClusterResized(
+		context.Background(), c, "env-race", "cluster-race",
+		client.ClusterSizing{VCPU: 8, RAMGB: 16, StorageGB: 250}, false,
+		waitTestInterval, time.Second,
+	)
+	if err != nil {
+		t.Fatalf("waitForClusterResized: %v", err)
+	}
+	if cluster.VCPU != 8 || requests.Load() != 2 {
+		t.Fatalf("wait must reject stale active sizing; cluster=%+v requests=%d", cluster, requests.Load())
+	}
+}
+
+func TestWaitForClusterActiveRetriesPerRequestTimeout(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			time.Sleep(150 * time.Millisecond)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"cluster-timeout","kind":"flex","status":"active"}`))
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL, unitToken, client.WithHTTPClient(&http.Client{Timeout: 50 * time.Millisecond}))
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+
+	cl, err := waitForClusterActive(context.Background(), c, "env-timeout", "cluster-timeout", waitTestInterval, time.Second)
+	if err != nil {
+		t.Fatalf("transient per-request timeout must be retried: %v", err)
+	}
+	if cl.Status != "active" {
+		t.Fatalf("expected active, got %q", cl.Status)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected exactly 2 GET requests, got %d", got)
+	}
+}
+
+func TestWaitForClusterActiveTimeoutIncludesCurrentGETError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"cluster-slow","kind":"flex","status":"active"}`))
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+
+	_, err = waitForClusterActive(context.Background(), c, "env-slow", "cluster-slow", waitTestInterval, 20*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected overall wait timeout")
+	}
+	if !containsAll(err.Error(), "last transient GET error", "context deadline exceeded") {
+		t.Fatalf("timeout must preserve the GET error that observed the deadline, got: %v", err)
+	}
+}
+
+func TestWaitForClusterActiveRetriesTransientHTTPStatus(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(w, `{"detail":"origin temporarily unavailable"}`, http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"cluster-503","kind":"business","status":"active"}`))
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+
+	if _, err := waitForClusterActive(context.Background(), c, "env-503", "cluster-503", waitTestInterval, time.Second); err != nil {
+		t.Fatalf("transient HTTP 503 must be retried: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected exactly 2 GET requests, got %d", got)
+	}
+}
+
+func TestWaitForClusterActiveDoesNotRetryPermanentHTTPStatus(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, `{"detail":"invalid token"}`, http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+
+	_, err = waitForClusterActive(context.Background(), c, "env-401", "cluster-401", waitTestInterval, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("expected permanent HTTP 401 error, got %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("permanent HTTP 401 must not be retried, got %d requests", got)
 	}
 }
 
@@ -121,6 +264,29 @@ func TestWaitForClusterGoneSuccess(t *testing.T) {
 	}
 	if srv.ClusterCount() != 0 {
 		t.Fatalf("expected 0 live clusters, got %d", srv.ClusterCount())
+	}
+}
+
+func TestWaitForClusterGoneRetriesTransientHTTPStatus(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(w, `{"detail":"gateway timeout"}`, http.StatusGatewayTimeout)
+			return
+		}
+		http.Error(w, `{"detail":"gone"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+
+	if err := waitForClusterGone(context.Background(), c, "env-504", "cluster-504", waitTestInterval, time.Second); err != nil {
+		t.Fatalf("transient HTTP 504 must be retried before accepting 404: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected exactly 2 GET requests, got %d", got)
 	}
 }
 

@@ -202,7 +202,7 @@ func TestUnitClusterCreateTimeoutPath(t *testing.T) {
 	}
 }
 
-func TestUnitClusterCreateHonorsTimeoutsBlock(t *testing.T) {
+func TestUnitClusterCreateHonorsTimeoutsObject(t *testing.T) {
 	srv := mockapi.New(unitToken)
 	defer srv.Close()
 	srv.ClusterReadyAfterGETs = 1 << 30
@@ -219,13 +219,289 @@ func TestUnitClusterCreateHonorsTimeoutsBlock(t *testing.T) {
 		"timeouts": tftypes.NewValue(timeoutsType, map[string]tftypes.Value{
 			"create": tftypes.NewValue(tftypes.String, "50ms"),
 			"delete": tftypes.NewValue(tftypes.String, nil),
+			"update": tftypes.NewValue(tftypes.String, nil),
 		}),
 	}))
 	if !resp.Diagnostics.HasError() {
-		t.Fatal("expected timeout diagnostics from the timeouts block value")
+		t.Fatal("expected timeout diagnostics from the timeouts object value")
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("configured create timeout (50ms) was not honored, took %s", elapsed)
+	}
+}
+
+func TestUnitClusterModifyPlanMarksVolatileFieldsUnknownOnResize(t *testing.T) {
+	srv := mockapi.New(unitToken)
+	defer srv.Close()
+	srv.ClusterReadyAfterGETs = 1
+	envID := unitEnv(t, srv, "lab-cl-unit-plan")
+	r := newUnitClusterResource(t, srv, 5*time.Second)
+	s := clusterSchema(t, r)
+
+	created := runClusterCreate(t, r, s, clusterValue(t, s, map[string]tftypes.Value{
+		"environment_id": tftypes.NewValue(tftypes.String, envID),
+		"size":           tftypes.NewValue(tftypes.String, "S"),
+	}))
+	if created.Diagnostics.HasError() {
+		t.Fatalf("create: %v", created.Diagnostics)
+	}
+
+	planRaw := clusterValue(t, s, map[string]tftypes.Value{
+		"environment_id":           tftypes.NewValue(tftypes.String, envID),
+		"id":                       tftypes.NewValue(tftypes.String, stateString(t, created.State, "id")),
+		"size":                     tftypes.NewValue(tftypes.String, "M"),
+		"status":                   tftypes.NewValue(tftypes.String, "resizing"),
+		"provisioning_diagnostics": tftypes.NewValue(tftypes.String, "old diagnostics"),
+	})
+	resp := resource.ModifyPlanResponse{Plan: tfsdk.Plan{Schema: s, Raw: planRaw}}
+	r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{
+		Plan:  tfsdk.Plan{Schema: s, Raw: planRaw},
+		State: created.State,
+	}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("modify plan: %v", resp.Diagnostics)
+	}
+
+	var values map[string]tftypes.Value
+	if err := resp.Plan.Raw.As(&values); err != nil {
+		t.Fatalf("decode modified plan: %v", err)
+	}
+	for _, attribute := range []string{"status", "provisioning_diagnostics"} {
+		if values[attribute].IsKnown() {
+			t.Fatalf("expected %s unknown in plan after sizing change, got %v", attribute, values[attribute])
+		}
+	}
+}
+
+func TestUnitClusterUpdateRejectsUnverifiableResizeResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configure  func(*mockapi.Server)
+		wantDetail []string
+	}{
+		{
+			name: "missing desired spec",
+			configure: func(srv *mockapi.Server) {
+				srv.ClusterResizeOmitDesiredSpec = true
+			},
+			wantDetail: []string{"omitted desired_spec", "safely verify convergence"},
+		},
+		{
+			name: "changed identity",
+			configure: func(srv *mockapi.Server) {
+				srv.ClusterResizeResponseID = "unexpected-cluster-id"
+			},
+			wantDetail: []string{"Expected cluster ID", "unexpected-cluster-id"},
+		},
+		{
+			name: "wrong kind",
+			configure: func(srv *mockapi.Server) {
+				srv.ClusterResizeResponseKind = "flex"
+			},
+			wantDetail: []string{"Expected kind", "business", "flex"},
+		},
+		{
+			name: "invalid desired spec",
+			configure: func(srv *mockapi.Server) {
+				srv.ClusterResizeInvalidDesiredSpec = true
+			},
+			wantDetail: []string{"invalid desired_spec", "business sizing is incomplete"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := mockapi.New(unitToken)
+			defer srv.Close()
+			srv.ClusterReadyAfterGETs = 1
+			envID := unitEnv(t, srv, "lab-cl-unit-guard")
+			r := newUnitClusterResource(t, srv, 5*time.Second)
+			s := clusterSchema(t, r)
+
+			created := runClusterCreate(t, r, s, clusterValue(t, s, map[string]tftypes.Value{
+				"environment_id": tftypes.NewValue(tftypes.String, envID),
+				"size":           tftypes.NewValue(tftypes.String, "S"),
+			}))
+			if created.Diagnostics.HasError() {
+				t.Fatalf("create: %v", created.Diagnostics)
+			}
+			tc.configure(srv)
+
+			clusterID := stateString(t, created.State, "id")
+			planRaw := clusterValue(t, s, map[string]tftypes.Value{
+				"environment_id": tftypes.NewValue(tftypes.String, envID),
+				"id":             tftypes.NewValue(tftypes.String, clusterID),
+				"size":           tftypes.NewValue(tftypes.String, "M"),
+			})
+			resp := resource.UpdateResponse{State: created.State}
+			r.Update(context.Background(), resource.UpdateRequest{
+				Plan:  tfsdk.Plan{Schema: s, Raw: planRaw},
+				State: created.State,
+			}, &resp)
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected resize response guard to fail")
+			}
+			if got := stateString(t, resp.State, "id"); got != clusterID {
+				t.Fatalf("resize guard changed state identity: got %q, want %q", got, clusterID)
+			}
+			detail := resp.Diagnostics.Errors()[0].Detail()
+			for _, want := range tc.wantDetail {
+				if !containsAll(detail, want) {
+					t.Fatalf("diagnostic %q does not contain %q", detail, want)
+				}
+			}
+		})
+	}
+}
+
+func TestUnitClusterUpdateRecoversInFlightResizeWithoutSecondPatch(t *testing.T) {
+	srv := mockapi.New(unitToken)
+	defer srv.Close()
+	srv.ClusterReadyAfterGETs = 1
+	envID := unitEnv(t, srv, "lab-cl-unit-recover")
+	r := newUnitClusterResource(t, srv, 5*time.Second)
+	s := clusterSchema(t, r)
+
+	created := runClusterCreate(t, r, s, clusterValue(t, s, map[string]tftypes.Value{
+		"environment_id": tftypes.NewValue(tftypes.String, envID),
+		"size":           tftypes.NewValue(tftypes.String, "S"),
+	}))
+	if created.Diagnostics.HasError() {
+		t.Fatalf("create: %v", created.Diagnostics)
+	}
+	clusterID := stateString(t, created.State, "id")
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	srv.ClusterReadyAfterGETs = 2
+	if _, err := c.ResizeCluster(context.Background(), envID, clusterID, client.ClusterResizeSpec{Size: "M"}); err != nil {
+		t.Fatalf("start resize: %v", err)
+	}
+
+	resizingState := created.State
+	if diags := resizingState.SetAttribute(context.Background(), path.Root("size"), "M"); diags.HasError() {
+		t.Fatalf("set state size: %v", diags)
+	}
+	if diags := resizingState.SetAttribute(context.Background(), path.Root("status"), "resizing"); diags.HasError() {
+		t.Fatalf("set state status: %v", diags)
+	}
+	plan := tfsdk.Plan{Schema: s, Raw: resizingState.Raw}
+	modifyResp := resource.ModifyPlanResponse{Plan: plan}
+	r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{
+		Plan:  plan,
+		State: resizingState,
+	}, &modifyResp)
+	if modifyResp.Diagnostics.HasError() {
+		t.Fatalf("modify recovery plan: %v", modifyResp.Diagnostics)
+	}
+	var planStatus tftypes.Value
+	var values map[string]tftypes.Value
+	if err := modifyResp.Plan.Raw.As(&values); err != nil {
+		t.Fatalf("decode recovery plan: %v", err)
+	}
+	planStatus = values["status"]
+	if planStatus.IsKnown() {
+		t.Fatalf("expected recovery status unknown, got %v", planStatus)
+	}
+
+	updateResp := resource.UpdateResponse{State: resizingState}
+	r.Update(context.Background(), resource.UpdateRequest{
+		Plan:  modifyResp.Plan,
+		State: resizingState,
+	}, &updateResp)
+	if updateResp.Diagnostics.HasError() {
+		t.Fatalf("recover update: %v", updateResp.Diagnostics)
+	}
+	if got := stateString(t, updateResp.State, "status"); got != "active" {
+		t.Fatalf("recovery status = %q, want active", got)
+	}
+	if got := srv.ClusterPatchCount(); got != 1 {
+		t.Fatalf("recovery sent a second PATCH: patch count = %d, want 1", got)
+	}
+}
+
+func TestUnitClusterResizeRecoveryRejectsUnverifiableGetResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configure  func(*mockapi.Server)
+		wantDetail []string
+	}{
+		{
+			name: "missing desired spec",
+			configure: func(srv *mockapi.Server) {
+				srv.ClusterGetOmitDesiredSpec = true
+			},
+			wantDetail: []string{"omitted desired_spec", "safely verify convergence"},
+		},
+		{
+			name: "invalid desired spec",
+			configure: func(srv *mockapi.Server) {
+				srv.ClusterGetInvalidDesiredSpec = true
+			},
+			wantDetail: []string{"invalid desired_spec", "business sizing is incomplete"},
+		},
+		{
+			name: "changed identity",
+			configure: func(srv *mockapi.Server) {
+				srv.ClusterGetResponseID = "unexpected-recovery-id"
+			},
+			wantDetail: []string{"Expected cluster ID", "unexpected-recovery-id"},
+		},
+		{
+			name: "wrong kind",
+			configure: func(srv *mockapi.Server) {
+				srv.ClusterGetResponseKind = "flex"
+			},
+			wantDetail: []string{"Expected kind", "business", "flex"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := mockapi.New(unitToken)
+			defer srv.Close()
+			srv.ClusterReadyAfterGETs = 1
+			envID := unitEnv(t, srv, "lab-cl-unit-recovery-guard")
+			r := newUnitClusterResource(t, srv, 50*time.Millisecond)
+			s := clusterSchema(t, r)
+			created := runClusterCreate(t, r, s, clusterValue(t, s, map[string]tftypes.Value{
+				"environment_id": tftypes.NewValue(tftypes.String, envID),
+				"size":           tftypes.NewValue(tftypes.String, "S"),
+			}))
+			if created.Diagnostics.HasError() {
+				t.Fatalf("create: %v", created.Diagnostics)
+			}
+			clusterID := stateString(t, created.State, "id")
+			c, err := client.New(srv.URL, unitToken)
+			if err != nil {
+				t.Fatalf("client.New: %v", err)
+			}
+			srv.ClusterReadyAfterGETs = 1 << 30
+			if _, err := c.ResizeCluster(context.Background(), envID, clusterID, client.ClusterResizeSpec{Size: "M"}); err != nil {
+				t.Fatalf("start resize: %v", err)
+			}
+			tc.configure(srv)
+
+			resizingState := created.State
+			if diags := resizingState.SetAttribute(context.Background(), path.Root("size"), "M"); diags.HasError() {
+				t.Fatalf("set state size: %v", diags)
+			}
+			if diags := resizingState.SetAttribute(context.Background(), path.Root("status"), "resizing"); diags.HasError() {
+				t.Fatalf("set state status: %v", diags)
+			}
+			plan := tfsdk.Plan{Schema: s, Raw: resizingState.Raw}
+			resp := resource.UpdateResponse{State: resizingState}
+			r.Update(context.Background(), resource.UpdateRequest{Plan: plan, State: resizingState}, &resp)
+			if !resp.Diagnostics.HasError() {
+				t.Fatal("expected recovery response guard to fail")
+			}
+			detail := resp.Diagnostics.Errors()[0].Detail()
+			for _, want := range tc.wantDetail {
+				if !containsAll(detail, want) {
+					t.Fatalf("diagnostic %q does not contain %q", detail, want)
+				}
+			}
+			if got := stateString(t, resp.State, "id"); got != clusterID {
+				t.Fatalf("recovery guard changed state identity: got %q, want %q", got, clusterID)
+			}
+		})
 	}
 }
 
@@ -320,12 +596,34 @@ func TestUnitClusterReadRemovesOnDestroyed(t *testing.T) {
 	}
 }
 
-func TestUnitClusterUpdateIsUnreachableGuard(t *testing.T) {
-	r := NewBusinessClusterResource().(*clusterResource)
-	resp := resource.UpdateResponse{}
-	r.Update(context.Background(), resource.UpdateRequest{}, &resp)
+func TestUnitClusterReadRejectsWrongKind(t *testing.T) {
+	srv := mockapi.New(unitToken)
+	defer srv.Close()
+	srv.ClusterReadyAfterGETs = 1
+	envID := unitEnv(t, srv, "lab-cl-unit-kind")
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	flex, err := c.CreateCluster(context.Background(), envID, client.ClusterSpec{Kind: "flex"})
+	if err != nil {
+		t.Fatalf("create flex cluster: %v", err)
+	}
+
+	r := newUnitClusterResource(t, srv, 5*time.Second) // business resource
+	s := clusterSchema(t, r)
+	state := tfsdk.State{Schema: s, Raw: clusterValue(t, s, map[string]tftypes.Value{
+		"environment_id": tftypes.NewValue(tftypes.String, envID),
+		"id":             tftypes.NewValue(tftypes.String, flex.ID),
+	})}
+	resp := resource.ReadResponse{State: state}
+	r.Read(context.Background(), resource.ReadRequest{State: state}, &resp)
+
 	if !resp.Diagnostics.HasError() {
-		t.Fatal("Update must fail loudly: all attributes are RequiresReplace")
+		t.Fatal("business resource must reject a flex cluster during Read/import refresh")
+	}
+	if !containsAll(resp.Diagnostics.Errors()[0].Detail(), "business", "flex") {
+		t.Fatalf("wrong-kind diagnostic must name expected and actual kinds: %v", resp.Diagnostics)
 	}
 }
 
@@ -333,6 +631,65 @@ func TestUnitFlexClusterDefaultCreateTimeoutCoversBackendReadiness(t *testing.T)
 	r := NewFlexClusterResource().(*clusterResource)
 	if r.cfg.defaultCreateTimeout < 25*time.Minute {
 		t.Fatalf("flex create timeout = %s, want at least 25m", r.cfg.defaultCreateTimeout)
+	}
+}
+
+func TestUnitClusterImportSetsCompositeIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		res  resource.Resource
+	}{
+		{name: "business", res: NewBusinessClusterResource()},
+		{name: "flex", res: NewFlexClusterResource()},
+		{name: "namespace", res: NewNamespaceResource()},
+		{name: "dedicated", res: NewDedicatedClusterResource()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := tc.res.(*clusterResource)
+			if !ok {
+				t.Fatalf("unexpected resource type %T", tc.res)
+			}
+			importer, ok := tc.res.(resource.ResourceWithImportState)
+			if !ok {
+				t.Fatalf("%s cluster does not implement ResourceWithImportState", tc.name)
+			}
+			s := clusterSchema(t, r)
+			objType := s.Type().TerraformType(context.Background()).(tftypes.Object)
+			resp := resource.ImportStateResponse{
+				State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)},
+			}
+
+			importer.ImportState(context.Background(), resource.ImportStateRequest{
+				ID: "env-123/cluster-456",
+			}, &resp)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("import diagnostics: %v", resp.Diagnostics)
+			}
+			if got := stateString(t, resp.State, "environment_id"); got != "env-123" {
+				t.Fatalf("environment_id = %q, want env-123", got)
+			}
+			if got := stateString(t, resp.State, "id"); got != "cluster-456" {
+				t.Fatalf("id = %q, want cluster-456", got)
+			}
+		})
+	}
+}
+
+func TestUnitClusterImportRejectsInvalidCompositeIdentity(t *testing.T) {
+	r := NewFlexClusterResource().(*clusterResource)
+	s := clusterSchema(t, r)
+	objType := s.Type().TerraformType(context.Background()).(tftypes.Object)
+
+	for _, id := range []string{"", "cluster-only", "/cluster", "env/", "env/cluster/extra"} {
+		t.Run(id, func(t *testing.T) {
+			resp := resource.ImportStateResponse{
+				State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)},
+			}
+			r.ImportState(context.Background(), resource.ImportStateRequest{ID: id}, &resp)
+			if !resp.Diagnostics.HasError() {
+				t.Fatalf("expected invalid import ID %q to fail", id)
+			}
+		})
 	}
 }
 

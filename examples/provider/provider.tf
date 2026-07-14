@@ -2,7 +2,7 @@ terraform {
   required_providers {
     fcs = {
       source  = "focusnetcloud/fcs"
-      version = "~> 0.10"
+      version = "~> 0.12"
     }
   }
 }

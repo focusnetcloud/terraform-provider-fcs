@@ -3,12 +3,12 @@
 page_title: "fcs_flex_cluster Resource - FCS"
 subcategory: ""
 description: |-
-  An FCS Flex cluster (shared virtual cluster) inside an environment. CIDRs and quotas are allocated server-side. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards.
+  An FCS Flex cluster (shared virtual cluster) inside an environment. CIDRs and quotas are allocated server-side. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards. Import uses <environment_id>/<cluster_id>. Sizing is read back from the API and changes are applied in place; the cluster ID and Kubernetes API remain unchanged.
 ---
 
 # fcs_flex_cluster (Resource)
 
-An FCS Flex cluster (shared virtual cluster) inside an environment. CIDRs and quotas are allocated server-side. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards.
+An FCS Flex cluster (shared virtual cluster) inside an environment. CIDRs and quotas are allocated server-side. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards. Import uses <environment_id>/<cluster_id>. Sizing is read back from the API and changes are applied in place; the cluster ID and Kubernetes API remain unchanged.
 
 
 
@@ -22,11 +22,11 @@ An FCS Flex cluster (shared virtual cluster) inside an environment. CIDRs and qu
 ### Optional
 
 - `k8s_version` (String) Kubernetes version, e.g. v1.35.3-k3s1 (server default when unset). Changing it forces a new cluster.
-- `ram_gb` (Number) Custom sizing: RAM in GB (alternative to size). Changing it forces a new cluster.
-- `size` (String) T-shirt size S | M | L (server default: S when neither size nor custom sizing is set). Mutually exclusive with vcpu/ram_gb/storage_gb. Changing it forces a new cluster (no resize path exists).
-- `storage_gb` (Number) Custom sizing: storage in GB (alternative to size). Changing it forces a new cluster.
+- `ram_gb` (Number) Custom sizing: RAM in GB (alternative to size). Changes resize the existing cluster in place.
+- `size` (String) T-shirt size S | M | L (server default: S when neither size nor custom sizing is set). Mutually exclusive with vcpu/ram_gb/storage_gb. Changes resize the existing cluster in place. Removing size later keeps the observed current sizing; set size explicitly to request another preset.
+- `storage_gb` (Number) Custom sizing: storage in GB (alternative to size). Storage is grow-only; changes resize the existing cluster in place.
 - `timeouts` (Attributes) (see [below for nested schema](#nestedatt--timeouts))
-- `vcpu` (Number) Custom sizing: vCPUs (alternative to size). Changing it forces a new cluster.
+- `vcpu` (Number) Custom sizing: vCPUs (alternative to size). Changes resize the existing cluster in place.
 
 ### Read-Only
 
@@ -35,12 +35,13 @@ An FCS Flex cluster (shared virtual cluster) inside an environment. CIDRs and qu
 - `id` (String) Server-assigned cluster ID (UUID).
 - `provisioning_diagnostics` (String) Server-provided provisioning diagnostics for asynchronous waits. Dedicated clusters include service gateway scope/status, tenant-networking pipeline, Apstra commit handoff and Rancher handoff details. This value is informational and must not be used as desired configuration.
 - `service_cidr` (String) Service CIDR (server-allocated).
-- `status` (String) Lifecycle status: provisioning | active | error | offboarding | destroyed.
+- `status` (String) Lifecycle status: provisioning | active | resizing | error | offboarding | destroyed.
 
 <a id="nestedatt--timeouts"></a>
 ### Nested Schema for `timeouts`
 
 Optional:
 
-- `create` (String) How long to wait for the cluster to reach status=active (default 25m0s). Accepts a duration string such as "30m".
-- `delete` (String) How long to wait for the teardown to finish (GET returns 404 or status=destroyed; default 15m0s).
+- `create` (String) How long to wait for the cluster to reach status=active (default 25m0s). This is an object attribute: configure it as timeouts = { create = "30m" }; a timeouts { ... } block is invalid.
+- `delete` (String) How long to wait for the teardown to finish (GET returns 404 or status=destroyed; default 15m0s). Configure it inside the same timeouts = { ... } object.
+- `update` (String) How long to wait for an in-place resize to reach the requested size (default 25m0s). Configure it inside the same timeouts = { ... } object.

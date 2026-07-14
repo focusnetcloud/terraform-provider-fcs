@@ -7,12 +7,15 @@ package provider
 //	TF_ACC=1 go test ./internal/provider/ -run TestAccDedicated -v
 
 import (
+	"context"
+	"fmt"
 	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
-	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 
+	"github.com/focusnetcloud/terraform-provider-fcs/internal/client"
 	"github.com/focusnetcloud/terraform-provider-fcs/internal/mockapi"
 )
 
@@ -93,6 +96,61 @@ resource "fcs_dedicated_cluster" "test" {
 	}
 }
 
+func TestAccDedicatedClusterImportReadsSizingWithoutReplacement(t *testing.T) {
+	srv := fastClusterMock(t)
+	c, err := client.New(srv.URL, accToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	env, err := c.CreateEnvironment(context.Background(), client.EnvironmentSpec{Name: "lab-ded-import"})
+	if err != nil {
+		t.Fatalf("create environment: %v", err)
+	}
+	cluster, err := c.CreateCluster(context.Background(), env.ID, client.ClusterSpec{
+		Kind: "dedicated", CPNodes: 3, CPVcpu: 4, CPRamGB: 8,
+		WorkerNodes: 2, WorkerVcpu: 8, WorkerRamGB: 16,
+		PVCStorageGB: 200,
+	})
+	if err != nil {
+		t.Fatalf("create dedicated cluster: %v", err)
+	}
+
+	config := accProviderConfig(srv.URL, accToken) + fmt.Sprintf(`
+resource "fcs_dedicated_cluster" "test" {
+  environment_id = %q
+  cp_nodes        = 3
+  cp_vcpu         = 4
+  cp_ram_gb       = 8
+  worker_nodes    = 2
+  worker_vcpu     = 8
+  worker_ram_gb   = 16
+  pvc_storage_gb  = 200
+}
+`, env.ID)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6Factories(),
+		Steps: []resource.TestStep{
+			{
+				Config:             config,
+				ResourceName:       "fcs_dedicated_cluster.test",
+				ImportState:        true,
+				ImportStateId:      env.ID + "/" + cluster.ID,
+				ImportStatePersist: true,
+			},
+			{
+				Config: config,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "id", cluster.ID),
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "cp_vcpu", "4"),
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "cp_ram_gb", "8"),
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "worker_nodes", "2"),
+				),
+			},
+			{Config: config, PlanOnly: true},
+		},
+	})
+}
+
 // TestAccDedicatedClusterDefaults: the optional node-pool attributes default
 // server-agnostically in the schema (cp_nodes=3, worker_*=0, pvc_storage_gb=100)
 // so a minimal config (only the required cp_vcpu/cp_ram_gb) is stable and
@@ -140,13 +198,28 @@ resource "fcs_dedicated_cluster" "test" {
 	}
 }
 
-// TestAccDedicatedClusterRequiresReplaceWorkerNodes: there is no in-place
-// node-pool resize — changing worker_nodes forces a full recreation.
-func TestAccDedicatedClusterRequiresReplaceWorkerNodes(t *testing.T) {
+func TestAccDedicatedClusterResizesWorkerPoolInPlace(t *testing.T) {
 	srv := mockapi.New(accToken)
 	srv.ClusterReadyAfterGETs = 1
 	srv.ClusterGoneAfterGETs = 0
 	t.Cleanup(srv.Close)
+	var clusterID string
+	checkIdentity := func(state *terraform.State) error {
+		res, ok := state.RootModule().Resources["fcs_dedicated_cluster.test"]
+		if !ok || res.Primary == nil {
+			return fmt.Errorf("dedicated cluster missing from state")
+		}
+		got := res.Primary.Attributes["id"]
+		if clusterID == "" {
+			clusterID = got
+		} else if got != clusterID {
+			return fmt.Errorf("cluster ID changed during resize: %s -> %s", clusterID, got)
+		}
+		if srv.ClusterCount() != 1 {
+			return fmt.Errorf("resize must keep exactly one cluster, got %d", srv.ClusterCount())
+		}
+		return nil
+	}
 
 	base := accProviderConfig(srv.URL, accToken) + `
 resource "fcs_environment" "test" {
@@ -172,22 +245,45 @@ resource "fcs_dedicated_cluster" "test" {
   cp_vcpu        = 2
   cp_ram_gb      = 8
   worker_nodes   = 3
-  worker_vcpu    = 4
-  worker_ram_gb  = 8
+  worker_vcpu    = 6
+  worker_ram_gb  = 12
+}
+`
+	scaledDown := accProviderConfig(srv.URL, accToken) + `
+resource "fcs_environment" "test" {
+  name = "lab-ded-replace"
+}
+
+resource "fcs_dedicated_cluster" "test" {
+  environment_id = fcs_environment.test.id
+  cp_vcpu        = 2
+  cp_ram_gb      = 8
+  worker_nodes   = 0
 }
 `
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6Factories(),
 		Steps: []resource.TestStep{
-			{Config: base},
+			{Config: base, Check: checkIdentity},
 			{
 				Config: scaled,
-				ConfigPlanChecks: resource.ConfigPlanChecks{
-					PreApply: []plancheck.PlanCheck{
-						plancheck.ExpectResourceAction("fcs_dedicated_cluster.test", plancheck.ResourceActionReplace),
-					},
-				},
-				Check: resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "worker_nodes", "3"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					checkIdentity,
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "worker_nodes", "3"),
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "worker_vcpu", "6"),
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "worker_ram_gb", "12"),
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "status", "active"),
+				),
+			},
+			{
+				Config: scaledDown,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					checkIdentity,
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "worker_nodes", "0"),
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "worker_vcpu", "0"),
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "worker_ram_gb", "0"),
+					resource.TestCheckResourceAttr("fcs_dedicated_cluster.test", "status", "active"),
+				),
 			},
 		},
 	})

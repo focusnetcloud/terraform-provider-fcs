@@ -3,12 +3,12 @@
 page_title: "fcs_dedicated_cluster Resource - FCS"
 subcategory: ""
 description: |-
-  An FCS Dedicated cluster (a real RKE2 cluster on dedicated nodes) inside an environment. It is sized with explicit control-plane and worker node pools (cp_nodes/cp_vcpu/cp_ram_gb and worker_nodes/worker_vcpu/worker_ram_gb) rather than a t-shirt size. CIDRs, IPs and VLANs are allocated server-side. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards.
+  An FCS Dedicated cluster (a real RKE2 cluster on dedicated nodes) inside an environment. It is sized with explicit control-plane and worker node pools (cp_nodes/cp_vcpu/cp_ram_gb and worker_nodes/worker_vcpu/worker_ram_gb) rather than a t-shirt size. CIDRs, IPs and VLANs are allocated server-side. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards. Import uses <environment_id>/<cluster_id>. Sizing is read back from the API and changes are applied in place; the cluster ID and Kubernetes API remain unchanged.
 ---
 
 # fcs_dedicated_cluster (Resource)
 
-An FCS Dedicated cluster (a real RKE2 cluster on dedicated nodes) inside an environment. It is sized with explicit control-plane and worker node pools (cp_nodes/cp_vcpu/cp_ram_gb and worker_nodes/worker_vcpu/worker_ram_gb) rather than a t-shirt size. CIDRs, IPs and VLANs are allocated server-side. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards.
+An FCS Dedicated cluster (a real RKE2 cluster on dedicated nodes) inside an environment. It is sized with explicit control-plane and worker node pools (cp_nodes/cp_vcpu/cp_ram_gb and worker_nodes/worker_vcpu/worker_ram_gb) rather than a t-shirt size. CIDRs, IPs and VLANs are allocated server-side. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards. Import uses <environment_id>/<cluster_id>. Sizing is read back from the API and changes are applied in place; the cluster ID and Kubernetes API remain unchanged.
 
 
 
@@ -17,19 +17,19 @@ An FCS Dedicated cluster (a real RKE2 cluster on dedicated nodes) inside an envi
 
 ### Required
 
-- `cp_ram_gb` (Number) RAM in GB per control-plane node (required, at least 8). Changing it forces a new cluster.
-- `cp_vcpu` (Number) vCPUs per control-plane node (required, at least 2; at least 4 for a single-node cluster without workers). Changing it forces a new cluster.
+- `cp_ram_gb` (Number) RAM in GB per control-plane node (required, at least 8). Changes roll the control-plane pool.
+- `cp_vcpu` (Number) vCPUs per control-plane node (required, at least 2; at least 4 for a single-node cluster without workers). Changes roll the control-plane pool.
 - `environment_id` (String) ID of the fcs_environment hosting this cluster. Changing it forces a new cluster.
 
 ### Optional
 
-- `cp_nodes` (Number) Number of control-plane nodes: 1 (single-node, non-HA) or 3 (HA). Defaults to 3. Changing it forces a new cluster (no resize path exists).
-- `pvc_storage_gb` (Number) Persistent-volume storage in GB available to the cluster (default 100, at least 50, in 50 GB steps). Changing it forces a new cluster.
+- `cp_nodes` (Number) Number of control-plane nodes: 1 (single-node, non-HA) or 3 (HA). Defaults to 3. Changes resize the existing pool in place.
+- `pvc_storage_gb` (Number) Persistent-volume storage in GB available to the cluster (default 100, at least 50, in 50 GB steps). Storage can only grow in place.
 - `rke2_version` (String) RKE2 version, e.g. v1.31.5+rke2r1 (server default when unset). Changing it forces a new cluster.
 - `timeouts` (Attributes) (see [below for nested schema](#nestedatt--timeouts))
-- `worker_nodes` (Number) Number of worker nodes (default 0: a control-plane-only cluster with workloads scheduled on the control plane). Changing it forces a full recreation of the cluster — there is no in-place node-pool resize.
-- `worker_ram_gb` (Number) RAM in GB per worker node (default 0). Changing it forces a full recreation of the cluster.
-- `worker_vcpu` (Number) vCPUs per worker node (default 0). Changing it forces a full recreation of the cluster.
+- `worker_nodes` (Number) Number of worker nodes (default 0: a control-plane-only cluster with workloads scheduled on the control plane). Changes scale the existing pool in place.
+- `worker_ram_gb` (Number) RAM in GB per worker node (default 0). Changes roll the worker pool.
+- `worker_vcpu` (Number) vCPUs per worker node (default 0). Changes roll the worker pool.
 
 ### Read-Only
 
@@ -38,12 +38,13 @@ An FCS Dedicated cluster (a real RKE2 cluster on dedicated nodes) inside an envi
 - `id` (String) Server-assigned cluster ID (UUID).
 - `provisioning_diagnostics` (String) Server-provided provisioning diagnostics for asynchronous waits. Dedicated clusters include service gateway scope/status, tenant-networking pipeline, Apstra commit handoff and Rancher handoff details. This value is informational and must not be used as desired configuration.
 - `service_cidr` (String) Service CIDR (server-allocated).
-- `status` (String) Lifecycle status: provisioning | active | error | offboarding | destroyed.
+- `status` (String) Lifecycle status: provisioning | active | resizing | error | offboarding | destroyed.
 
 <a id="nestedatt--timeouts"></a>
 ### Nested Schema for `timeouts`
 
 Optional:
 
-- `create` (String) How long to wait for the cluster to reach status=active (default 30m0s). Accepts a duration string such as "30m".
-- `delete` (String) How long to wait for the teardown to finish (GET returns 404 or status=destroyed; default 20m0s).
+- `create` (String) How long to wait for the cluster to reach status=active (default 30m0s). This is an object attribute: configure it as timeouts = { create = "30m" }; a timeouts { ... } block is invalid.
+- `delete` (String) How long to wait for the teardown to finish (GET returns 404 or status=destroyed; default 20m0s). Configure it inside the same timeouts = { ... } object.
+- `update` (String) How long to wait for an in-place resize to reach the requested size (default 30m0s). Configure it inside the same timeouts = { ... } object.

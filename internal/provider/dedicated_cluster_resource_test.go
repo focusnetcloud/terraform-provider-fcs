@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	fwschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -108,6 +109,153 @@ func TestUnitDedicatedCreatePollsToActive(t *testing.T) {
 	}
 	if srv.ClusterCount() != 1 {
 		t.Fatalf("expected 1 cluster on the server, got %d", srv.ClusterCount())
+	}
+}
+
+func TestUnitDedicatedModifyPlanMarksVolatileFieldsUnknownOnResize(t *testing.T) {
+	r := NewDedicatedClusterResource().(*clusterResource)
+	s := clusterSchema(t, r)
+	stateAttrs := requiredDedicatedSizing()
+	stateAttrs["environment_id"] = tftypes.NewValue(tftypes.String, "env-dedicated-plan")
+	stateAttrs["id"] = tftypes.NewValue(tftypes.String, "cluster-dedicated-plan")
+	stateAttrs["worker_nodes"] = tftypes.NewValue(tftypes.Number, 1)
+	stateAttrs["worker_vcpu"] = tftypes.NewValue(tftypes.Number, 2)
+	stateAttrs["worker_ram_gb"] = tftypes.NewValue(tftypes.Number, 4)
+	stateAttrs["status"] = tftypes.NewValue(tftypes.String, "resizing")
+	stateAttrs["provisioning_diagnostics"] = tftypes.NewValue(tftypes.String, "old diagnostics")
+	stateRaw := dedicatedValue(t, s, stateAttrs)
+
+	planAttrs := requiredDedicatedSizing()
+	planAttrs["environment_id"] = tftypes.NewValue(tftypes.String, "env-dedicated-plan")
+	planAttrs["id"] = tftypes.NewValue(tftypes.String, "cluster-dedicated-plan")
+	planAttrs["worker_nodes"] = tftypes.NewValue(tftypes.Number, 2)
+	planAttrs["worker_vcpu"] = tftypes.NewValue(tftypes.Number, 2)
+	planAttrs["worker_ram_gb"] = tftypes.NewValue(tftypes.Number, 4)
+	planAttrs["status"] = tftypes.NewValue(tftypes.String, "resizing")
+	planAttrs["provisioning_diagnostics"] = tftypes.NewValue(tftypes.String, "old diagnostics")
+	planRaw := dedicatedValue(t, s, planAttrs)
+
+	resp := resource.ModifyPlanResponse{Plan: tfsdk.Plan{Schema: s, Raw: planRaw}}
+	r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{
+		Plan:  tfsdk.Plan{Schema: s, Raw: planRaw},
+		State: tfsdk.State{Schema: s, Raw: stateRaw},
+	}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("modify plan: %v", resp.Diagnostics)
+	}
+
+	var values map[string]tftypes.Value
+	if err := resp.Plan.Raw.As(&values); err != nil {
+		t.Fatalf("decode modified plan: %v", err)
+	}
+	for _, attribute := range []string{"status", "provisioning_diagnostics"} {
+		if values[attribute].IsKnown() {
+			t.Fatalf("expected %s unknown in dedicated resize plan, got %v", attribute, values[attribute])
+		}
+	}
+}
+
+func TestUnitDedicatedUpdateRejectsInvalidDesiredSpec(t *testing.T) {
+	srv := mockapi.New(unitToken)
+	defer srv.Close()
+	srv.DedicatedClusterReadyAfterGETs = 1
+	envID := unitEnv(t, srv, "lab-ded-unit-guard")
+	r := newUnitDedicatedResource(t, srv, 5*time.Second)
+	s := clusterSchema(t, r)
+
+	attrs := requiredDedicatedSizing()
+	attrs["environment_id"] = tftypes.NewValue(tftypes.String, envID)
+	attrs["cp_nodes"] = tftypes.NewValue(tftypes.Number, 1)
+	attrs["worker_nodes"] = tftypes.NewValue(tftypes.Number, 1)
+	attrs["worker_vcpu"] = tftypes.NewValue(tftypes.Number, 2)
+	attrs["worker_ram_gb"] = tftypes.NewValue(tftypes.Number, 4)
+	attrs["pvc_storage_gb"] = tftypes.NewValue(tftypes.Number, 50)
+	created := runClusterCreate(t, r, s, dedicatedValue(t, s, attrs))
+	if created.Diagnostics.HasError() {
+		t.Fatalf("create: %v", created.Diagnostics)
+	}
+	clusterID := stateString(t, created.State, "id")
+	srv.ClusterResizeInvalidDesiredSpec = true
+
+	planAttrs := requiredDedicatedSizing()
+	planAttrs["environment_id"] = tftypes.NewValue(tftypes.String, envID)
+	planAttrs["id"] = tftypes.NewValue(tftypes.String, clusterID)
+	planAttrs["cp_nodes"] = tftypes.NewValue(tftypes.Number, 1)
+	planAttrs["worker_nodes"] = tftypes.NewValue(tftypes.Number, 2)
+	planAttrs["worker_vcpu"] = tftypes.NewValue(tftypes.Number, 2)
+	planAttrs["worker_ram_gb"] = tftypes.NewValue(tftypes.Number, 4)
+	planAttrs["pvc_storage_gb"] = tftypes.NewValue(tftypes.Number, 50)
+	resp := resource.UpdateResponse{State: created.State}
+	r.Update(context.Background(), resource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: s, Raw: dedicatedValue(t, s, planAttrs)},
+		State: created.State,
+	}, &resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected invalid dedicated desired_spec to fail closed")
+	}
+	if !containsAll(resp.Diagnostics.Errors()[0].Detail(), "invalid desired_spec", "dedicated sizing is incomplete") {
+		t.Fatalf("unexpected diagnostic: %v", resp.Diagnostics)
+	}
+	if got := stateString(t, resp.State, "id"); got != clusterID {
+		t.Fatalf("dedicated resize guard changed state identity: got %q, want %q", got, clusterID)
+	}
+}
+
+func TestUnitDedicatedUpdateRecoversInFlightResizeWithoutSecondPatch(t *testing.T) {
+	srv := mockapi.New(unitToken)
+	defer srv.Close()
+	srv.DedicatedClusterReadyAfterGETs = 1
+	envID := unitEnv(t, srv, "lab-ded-unit-recover")
+	r := newUnitDedicatedResource(t, srv, 5*time.Second)
+	s := clusterSchema(t, r)
+
+	attrs := requiredDedicatedSizing()
+	attrs["environment_id"] = tftypes.NewValue(tftypes.String, envID)
+	attrs["cp_nodes"] = tftypes.NewValue(tftypes.Number, 1)
+	attrs["worker_nodes"] = tftypes.NewValue(tftypes.Number, 1)
+	attrs["worker_vcpu"] = tftypes.NewValue(tftypes.Number, 2)
+	attrs["worker_ram_gb"] = tftypes.NewValue(tftypes.Number, 4)
+	attrs["pvc_storage_gb"] = tftypes.NewValue(tftypes.Number, 50)
+	created := runClusterCreate(t, r, s, dedicatedValue(t, s, attrs))
+	if created.Diagnostics.HasError() {
+		t.Fatalf("create: %v", created.Diagnostics)
+	}
+	clusterID := stateString(t, created.State, "id")
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	srv.DedicatedClusterReadyAfterGETs = 2
+	if _, err := c.ResizeCluster(context.Background(), envID, clusterID, client.ClusterResizeSpec{
+		WorkerNodes: int64Pointer(2),
+	}); err != nil {
+		t.Fatalf("start dedicated resize: %v", err)
+	}
+
+	resizingState := created.State
+	if diags := resizingState.SetAttribute(context.Background(), path.Root("worker_nodes"), int64(2)); diags.HasError() {
+		t.Fatalf("set state worker_nodes: %v", diags)
+	}
+	if diags := resizingState.SetAttribute(context.Background(), path.Root("status"), "resizing"); diags.HasError() {
+		t.Fatalf("set state status: %v", diags)
+	}
+	plan := tfsdk.Plan{Schema: s, Raw: resizingState.Raw}
+	modifyResp := resource.ModifyPlanResponse{Plan: plan}
+	r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{Plan: plan, State: resizingState}, &modifyResp)
+	if modifyResp.Diagnostics.HasError() {
+		t.Fatalf("modify recovery plan: %v", modifyResp.Diagnostics)
+	}
+
+	updateResp := resource.UpdateResponse{State: resizingState}
+	r.Update(context.Background(), resource.UpdateRequest{Plan: modifyResp.Plan, State: resizingState}, &updateResp)
+	if updateResp.Diagnostics.HasError() {
+		t.Fatalf("recover dedicated update: %v", updateResp.Diagnostics)
+	}
+	if got := stateString(t, updateResp.State, "status"); got != "active" {
+		t.Fatalf("dedicated recovery status = %q, want active", got)
+	}
+	if got := srv.ClusterPatchCount(); got != 1 {
+		t.Fatalf("dedicated recovery sent a second PATCH: patch count = %d, want 1", got)
 	}
 }
 
@@ -236,15 +384,6 @@ func TestUnitDedicatedReadRemovesOn404(t *testing.T) {
 	}
 	if !readResp.State.Raw.IsNull() {
 		t.Fatal("expected resource to be removed from state after 404")
-	}
-}
-
-func TestUnitDedicatedUpdateIsUnreachableGuard(t *testing.T) {
-	r := NewDedicatedClusterResource().(*clusterResource)
-	resp := resource.UpdateResponse{}
-	r.Update(context.Background(), resource.UpdateRequest{}, &resp)
-	if !resp.Diagnostics.HasError() {
-		t.Fatal("Update must fail loudly: all attributes are RequiresReplace")
 	}
 }
 

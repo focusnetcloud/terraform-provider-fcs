@@ -4,14 +4,14 @@ page_title: "fcs_cluster_kubeconfig Ephemeral Resource - FCS"
 subcategory: ""
 description: |-
   Mints cluster-scoped credentials for a cluster in an environment. This is an ephemeral resource (requires Terraform >= 1.10): the credentials are held in memory for the duration of the run and are never written to the Terraform plan or state. Use the result only as an ephemeral input, e.g. for kubernetes/helm provider configuration blocks (provider configurations accept ephemeral values).
-  Security note: depending on backend capabilities, minted credentials may remain valid beyond the current Terraform run. Treat expires_at as an advisory timestamp unless your FCS tenant explicitly documents enforced credential expiry. The ephemeral, never-persisted delivery path is mandatory for these credentials.
+  Security note: each Open operation requests fresh credentials. Do not copy, cache, or reuse an earlier kubeconfig or token. Credentials may remain valid beyond the current Terraform run; treat expires_at as advisory unless your FCS tenant documents enforced expiry. The ephemeral, never-persisted delivery path is mandatory.
 ---
 
 # fcs_cluster_kubeconfig (Ephemeral Resource)
 
 Mints cluster-scoped credentials for a cluster in an environment. This is an **ephemeral resource** (requires Terraform >= 1.10): the credentials are held in memory for the duration of the run and are **never written to the Terraform plan or state**. Use the result only as an ephemeral input, e.g. for `kubernetes`/`helm` provider configuration blocks (provider configurations accept ephemeral values).
 
-**Security note:** depending on backend capabilities, minted credentials may remain valid beyond the current Terraform run. Treat `expires_at` as an advisory timestamp unless your FCS tenant explicitly documents enforced credential expiry. The ephemeral, never-persisted delivery path is mandatory for these credentials.
+**Security note:** each Open operation requests fresh credentials. Do not copy, cache, or reuse an earlier kubeconfig or token. Credentials may remain valid beyond the current Terraform run; treat `expires_at` as advisory unless your FCS tenant documents enforced expiry. The ephemeral, never-persisted delivery path is mandatory.
 
 
 
@@ -26,6 +26,6 @@ Mints cluster-scoped credentials for a cluster in an environment. This is an **e
 ### Read-Only
 
 - `api_server_url` (String) Kube-API endpoint the credentials are valid for.
-- `expires_at` (String) Expiry timestamp of the minted credentials (RFC 3339). May be advisory depending on backend capabilities.
+- `expires_at` (String) Server-declared expiry timestamp of the minted credentials (RFC 3339). May be advisory depending on backend capabilities.
 - `kubeconfig` (String, Sensitive) Rendered kubeconfig. Sensitive and ephemeral — never persisted to plan/state.
-- `sa_token` (String, Sensitive) Service-account bearer token. Sensitive and ephemeral; null when the backend does not return one.
+- `sa_token` (String, Sensitive) Bearer token returned separately by the backend. Sensitive and ephemeral; null when the backend does not return a separate token value.

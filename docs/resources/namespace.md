@@ -3,12 +3,12 @@
 page_title: "fcs_namespace Resource - FCS"
 subcategory: ""
 description: |-
-  An FCS Free-tier namespace inside an environment (a real namespace on a shared cluster). Sizing is fixed by the product tier. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards.
+  An FCS Free-tier namespace inside an environment (a real namespace on a shared cluster). Sizing is fixed by the product tier. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards. Import uses <environment_id>/<cluster_id>.
 ---
 
 # fcs_namespace (Resource)
 
-An FCS Free-tier namespace inside an environment (a real namespace on a shared cluster). Sizing is fixed by the product tier. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards.
+An FCS Free-tier namespace inside an environment (a real namespace on a shared cluster). Sizing is fixed by the product tier. Create is asynchronous: the provider polls until status=active. Destroy polls until the cluster is gone so the environment is only torn down afterwards. Import uses <environment_id>/<cluster_id>.
 
 
 
@@ -30,12 +30,13 @@ An FCS Free-tier namespace inside an environment (a real namespace on a shared c
 - `id` (String) Server-assigned cluster ID (UUID).
 - `provisioning_diagnostics` (String) Server-provided provisioning diagnostics for asynchronous waits. Dedicated clusters include service gateway scope/status, tenant-networking pipeline, Apstra commit handoff and Rancher handoff details. This value is informational and must not be used as desired configuration.
 - `service_cidr` (String) Service CIDR (server-allocated).
-- `status` (String) Lifecycle status: provisioning | active | error | offboarding | destroyed.
+- `status` (String) Lifecycle status: provisioning | active | resizing | error | offboarding | destroyed.
 
 <a id="nestedatt--timeouts"></a>
 ### Nested Schema for `timeouts`
 
 Optional:
 
-- `create` (String) How long to wait for the cluster to reach status=active (default 10m0s). Accepts a duration string such as "30m".
-- `delete` (String) How long to wait for the teardown to finish (GET returns 404 or status=destroyed; default 15m0s).
+- `create` (String) How long to wait for the cluster to reach status=active (default 10m0s). This is an object attribute: configure it as timeouts = { create = "30m" }; a timeouts { ... } block is invalid.
+- `delete` (String) How long to wait for the teardown to finish (GET returns 404 or status=destroyed; default 15m0s). Configure it inside the same timeouts = { ... } object.
+- `update` (String) How long to wait for an in-place resize to reach the requested size (default 10m0s). Configure it inside the same timeouts = { ... } object.

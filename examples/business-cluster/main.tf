@@ -8,7 +8,7 @@ terraform {
   required_providers {
     fcs = {
       source  = "focusnetcloud/fcs"
-      version = "~> 0.10"
+      version = "~> 0.12"
     }
     kubernetes = {
       source  = "hashicorp/kubernetes"
@@ -50,6 +50,10 @@ resource "fcs_business_cluster" "lab" {
     delete = "15m"
   }
 }
+
+# Recovery for an existing cluster that is no longer in state:
+# terraform import fcs_business_cluster.lab '<environment_id>/<cluster_id>'
+# Verify the declared sizing matches the existing cluster before applying.
 
 # Cluster-scoped credentials as an EPHEMERAL resource (Terraform >= 1.10):
 # minted fresh on every run and held in memory only — never written to the
