@@ -6,8 +6,10 @@ package client_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -71,6 +73,82 @@ func TestCreateClusterIdempotentReapply(t *testing.T) {
 	}
 	if srv.ClusterCount() != 1 {
 		t.Fatalf("expected exactly 1 cluster, got %d", srv.ClusterCount())
+	}
+}
+
+func TestResizeClusterKeepsIdentityAndReturnsDesiredSizing(t *testing.T) {
+	srv := mockapi.New(testToken)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL, testToken)
+	envID := newEnvForClusters(t, c, "lab-cl-resize")
+	created, err := c.CreateCluster(context.Background(), envID, client.ClusterSpec{
+		Kind: "business",
+		Size: "S",
+	})
+	if err != nil {
+		t.Fatalf("CreateCluster: %v", err)
+	}
+
+	resized, err := c.ResizeCluster(context.Background(), envID, created.ID, client.ClusterResizeSpec{
+		Size: "M",
+	})
+	if err != nil {
+		t.Fatalf("ResizeCluster: %v", err)
+	}
+	if resized.ID != created.ID {
+		t.Fatalf("resize changed cluster id: got %q, want %q", resized.ID, created.ID)
+	}
+	if resized.Status != "resizing" {
+		t.Fatalf("status = %q, want resizing", resized.Status)
+	}
+	if resized.DesiredSpec == nil || resized.DesiredSpec.VCPU != 8 || resized.DesiredSpec.RAMGB != 16 || resized.DesiredSpec.StorageGB != 250 {
+		t.Fatalf("resize response must expose the API-resolved desired sizing, got %+v", resized.DesiredSpec)
+	}
+	if srv.ClusterCount() != 1 {
+		t.Fatalf("resize must not create a second cluster, got %d", srv.ClusterCount())
+	}
+}
+
+func TestResizeClusterSerializesZeroWorkerNodes(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode resize body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"id":"cluster-1","kind":"dedicated","status":"resizing","desired_spec":{"worker_nodes":0}}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv.URL, testToken)
+	zero := int64(0)
+
+	resized, err := c.ResizeCluster(context.Background(), "env-1", "cluster-1", client.ClusterResizeSpec{WorkerNodes: &zero})
+	if err != nil {
+		t.Fatalf("ResizeCluster: %v", err)
+	}
+	value, present := body["worker_nodes"]
+	if !present || value != float64(0) {
+		t.Fatalf("worker_nodes=0 must be present in PATCH body, got %#v", body)
+	}
+	if resized.DesiredSpec == nil || resized.DesiredSpec.WorkerNodes != 0 {
+		t.Fatalf("expected desired worker_nodes=0, got %+v", resized.DesiredSpec)
+	}
+}
+
+func TestResizeClusterRejectsStorageShrink(t *testing.T) {
+	srv := mockapi.New(testToken)
+	defer srv.Close()
+	c := newTestClient(t, srv.URL, testToken)
+	envID := newEnvForClusters(t, c, "lab-cl-shrink")
+	created, err := c.CreateCluster(context.Background(), envID, client.ClusterSpec{Kind: "business", VCPU: 4, RAMGB: 8, StorageGB: 100})
+	if err != nil {
+		t.Fatalf("CreateCluster: %v", err)
+	}
+
+	_, err = c.ResizeCluster(context.Background(), envID, created.ID, client.ClusterResizeSpec{VCPU: 4, RAMGB: 8, StorageGB: 50})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 409") {
+		t.Fatalf("storage shrink must return HTTP 409, got %v", err)
 	}
 }
 

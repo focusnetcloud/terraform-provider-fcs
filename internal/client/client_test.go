@@ -3,8 +3,11 @@ package client_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -44,6 +47,34 @@ func TestNewValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := client.New(tc.endpoint, tc.token); err == nil {
 				t.Fatalf("expected error for endpoint=%q token=%q", tc.endpoint, tc.token)
+			}
+		})
+	}
+}
+
+func TestIsRetryableReadError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "request timeout", err: &client.APIError{StatusCode: http.StatusRequestTimeout}, want: true},
+		{name: "rate limit", err: &client.APIError{StatusCode: http.StatusTooManyRequests}, want: true},
+		{name: "server error", err: &client.APIError{StatusCode: http.StatusBadGateway}, want: true},
+		{name: "unauthorized", err: &client.APIError{StatusCode: http.StatusUnauthorized}, want: false},
+		{name: "conflict", err: &client.APIError{StatusCode: http.StatusConflict}, want: false},
+		{name: "per-request deadline", err: fmt.Errorf("request: %w", context.DeadlineExceeded), want: true},
+		{name: "caller cancellation", err: fmt.Errorf("request: %w", context.Canceled), want: false},
+		{name: "truncated response", err: fmt.Errorf("decode: %w", io.ErrUnexpectedEOF), want: true},
+		{name: "platform syscall failure", err: &os.SyscallError{Syscall: "connect", Err: errors.New("platform connection refused")}, want: true},
+		{name: "permanent decode error", err: errors.New("invalid character in response"), want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := client.IsRetryableReadError(tc.err); got != tc.want {
+				t.Fatalf("IsRetryableReadError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}

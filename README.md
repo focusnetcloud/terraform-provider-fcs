@@ -77,7 +77,7 @@ vcluster.
 ```hcl
 terraform {
   required_providers {
-    fcs = { source = "focusnetcloud/fcs", version = "~> 0.10" }
+    fcs = { source = "focusnetcloud/fcs", version = "~> 0.12" }
   }
 }
 
@@ -150,7 +150,7 @@ resource "fcs_iaas_network" "web" {
 
 resource "fcs_vm" "web01" {
   environment_id = fcs_environment.prod.id
-  image          = "worker-ubuntu2204-qga"
+  image          = "coriolis-worker-ubuntu2204-qga"
   name           = "web01"
   nic_network    = "iaas"
   vdc_id         = fcs_iaas_vdc.prod.id
@@ -201,6 +201,64 @@ returns a gateway hostname such as `frontend-t1234.free.k8s.focusnet.de` or
 `api-t1234.flex.k8s.focusnet.de`. All configurable attributes are immutable and
 force replacement.
 
+## Cluster timeouts and recovery
+
+Cluster `timeouts` are an object attribute, not a nested Terraform block. Use
+an equals sign:
+
+```hcl
+resource "fcs_flex_cluster" "app" {
+  environment_id = fcs_environment.app.id
+
+  timeouts = {
+    create = "30m"
+    update = "30m"
+    delete = "20m"
+  }
+}
+```
+
+`timeouts { ... }` is invalid for these resources. The create/update/delete
+duration is the overall wait deadline. Individual transient polling failures
+such as a request timeout, HTTP 429, or HTTP 5xx are retried inside that
+deadline; authentication and other permanent HTTP 4xx errors fail immediately.
+
+If a create operation reaches its overall deadline, first inspect the cluster
+through the FCS API. Do not apply a tainted resource blindly: Terraform or
+OpenTofu will plan a replacement. If the tracked cluster is healthy, use
+`terraform untaint <resource-address>` (or `tofu untaint`) before planning. If
+the cluster is no longer in state, import it with its environment-scoped ID:
+
+```sh
+terraform import fcs_flex_cluster.app \
+  '<environment_id>/<cluster_id>'
+```
+
+The same import format is supported by `fcs_namespace`,
+`fcs_business_cluster`, and `fcs_dedicated_cluster`. The provider reads the
+current sizing from the API during import. Business and Flex imports use the
+equivalent numeric `vcpu`, `ram_gb`, and `storage_gb` configuration because the
+API does not preserve which T-shirt alias originally selected those values.
+The API also does not expose the originally selected `k8s_version` or
+`rke2_version`. Leave that replacement-only attribute unset while adopting an
+existing cluster; adding a pinned version afterwards intentionally plans a
+replacement because Terraform cannot prove that it matches the running
+cluster.
+
+Sizing changes use `PATCH` and keep the same cluster ID and Kubernetes API.
+Increasing or decreasing a Dedicated worker count scales its existing machine
+pool. Changes to per-node CPU or RAM roll the affected pool. Storage is
+grow-only; shrink requests fail with HTTP 409. Environment and Kubernetes/RKE2
+version changes remain replacement-only.
+Removing `size` from an existing resource without adding custom sizing keeps
+the currently observed sizing; it does not reset the cluster to `S`. Set
+`size = "S"` explicitly to request that preset. The request still follows the
+grow-only storage rule and can therefore return HTTP 409 after a larger preset.
+When `size` is configured, the API does not expose enough information to map
+an out-of-band numeric resize back to the original T-shirt alias. The provider
+therefore keeps the configured alias in state; use custom numeric sizing when
+Terraform must detect and reconcile sizing drift.
+
 ## Full Small-Smoke Example
 
 For a complete product-path smoke run. This uses the public FCS API endpoint and
@@ -224,7 +282,7 @@ small:
 
 - VM: 1 vCPU, 2 GiB RAM, 20 GiB disk
 - VM image: configurable via `vm_image`; default matches the current catalog
-  smoke image `worker-ubuntu2204-qga`
+  smoke image `coriolis-worker-ubuntu2204-qga`
 - namespace: fixed free-tier sizing
 - flex cluster: 1 vCPU, 2 GiB RAM, 20 GiB storage
 - business cluster: `size = "S"`

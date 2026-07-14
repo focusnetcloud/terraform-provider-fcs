@@ -16,13 +16,40 @@ import (
 
 // Cluster mirrors the stable contract fields of the Cluster schema.
 type Cluster struct {
-	ID                      string `json:"id"`
-	Kind                    string `json:"kind"`
-	Status                  string `json:"status"`
-	APIServerURL            string `json:"api_server_url"`
-	ClusterCIDR             string `json:"cluster_cidr"`
-	ServiceCIDR             string `json:"service_cidr"`
-	ProvisioningDiagnostics string `json:"provisioning_diagnostics"`
+	ID                      string         `json:"id"`
+	Kind                    string         `json:"kind"`
+	Status                  string         `json:"status"`
+	APIServerURL            string         `json:"api_server_url"`
+	ClusterCIDR             string         `json:"cluster_cidr"`
+	ServiceCIDR             string         `json:"service_cidr"`
+	ProvisioningDiagnostics string         `json:"provisioning_diagnostics"`
+	VCPU                    int64          `json:"vcpu"`
+	RAMGB                   int64          `json:"ram_gb"`
+	StorageGB               int64          `json:"storage_gb"`
+	CPNodes                 int64          `json:"cp_nodes"`
+	CPVcpu                  int64          `json:"cp_vcpu"`
+	CPRamGB                 int64          `json:"cp_ram_gb"`
+	WorkerNodes             int64          `json:"worker_nodes"`
+	WorkerVcpu              int64          `json:"worker_vcpu"`
+	WorkerRamGB             int64          `json:"worker_ram_gb"`
+	PVCStorageGB            int64          `json:"pvc_storage_gb"`
+	DesiredSpec             *ClusterSizing `json:"desired_spec,omitempty"`
+}
+
+// ClusterSizing is the server-resolved target of an in-place resize. The API
+// includes it in the PATCH response so clients do not have to duplicate the
+// product catalog's t-shirt-size mapping.
+type ClusterSizing struct {
+	VCPU         int64 `json:"vcpu"`
+	RAMGB        int64 `json:"ram_gb"`
+	StorageGB    int64 `json:"storage_gb"`
+	CPNodes      int64 `json:"cp_nodes"`
+	CPVcpu       int64 `json:"cp_vcpu"`
+	CPRamGB      int64 `json:"cp_ram_gb"`
+	WorkerNodes  int64 `json:"worker_nodes"`
+	WorkerVcpu   int64 `json:"worker_vcpu"`
+	WorkerRamGB  int64 `json:"worker_ram_gb"`
+	PVCStorageGB int64 `json:"pvc_storage_gb"`
 }
 
 // ClusterSpec is the create payload (ClusterSpec schema). Size and the
@@ -50,6 +77,23 @@ type ClusterSpec struct {
 	WorkerRamGB  int64  `json:"worker_ram_gb,omitempty"`
 	PVCStorageGB int64  `json:"pvc_storage_gb,omitempty"`
 	RKE2Version  string `json:"rke2_version,omitempty"`
+}
+
+// ClusterResizeSpec is the partial in-place sizing payload. Kubernetes
+// versions are intentionally absent because version changes still replace the
+// resource.
+type ClusterResizeSpec struct {
+	Size         string `json:"size,omitempty"`
+	VCPU         int64  `json:"vcpu,omitempty"`
+	RAMGB        int64  `json:"ram_gb,omitempty"`
+	StorageGB    int64  `json:"storage_gb,omitempty"`
+	CPNodes      int64  `json:"cp_nodes,omitempty"`
+	CPVcpu       int64  `json:"cp_vcpu,omitempty"`
+	CPRamGB      int64  `json:"cp_ram_gb,omitempty"`
+	WorkerNodes  *int64 `json:"worker_nodes,omitempty"`
+	WorkerVcpu   *int64 `json:"worker_vcpu,omitempty"`
+	WorkerRamGB  *int64 `json:"worker_ram_gb,omitempty"`
+	PVCStorageGB int64  `json:"pvc_storage_gb,omitempty"`
 }
 
 // KubeconfigCredentials is the response of the kubeconfig mint endpoint.
@@ -107,6 +151,26 @@ func (c *Client) GetCluster(ctx context.Context, envID, clusterID string) (*Clus
 	var cl Cluster
 	if err := json.Unmarshal(body, &cl); err != nil {
 		return nil, fmt.Errorf("decoding cluster: %w", err)
+	}
+	return &cl, nil
+}
+
+// ResizeCluster PATCHes the desired size of an existing cluster. The API
+// returns 202 while the same cluster ID converges asynchronously.
+func (c *Client) ResizeCluster(ctx context.Context, envID, clusterID string, spec ClusterResizeSpec) (*Cluster, error) {
+	status, body, err := c.do(ctx, http.MethodPatch, clusterItemPath(envID, clusterID), spec)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusAccepted && status != http.StatusOK {
+		return nil, apiError(status, body)
+	}
+	var cl Cluster
+	if err := json.Unmarshal(body, &cl); err != nil {
+		return nil, fmt.Errorf("decoding cluster resize response (HTTP %d): %w", status, err)
+	}
+	if cl.ID == "" {
+		return nil, fmt.Errorf("cluster resize returned HTTP %d without a cluster id", status)
 	}
 	return &cl, nil
 }

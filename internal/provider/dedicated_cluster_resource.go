@@ -3,12 +3,9 @@ package provider
 // fcs_dedicated_cluster (kind=dedicated) creates a real RKE2 cluster sized via
 // explicit control-plane and worker node pools.
 //
-// It reuses the generic clusterResource implementation (Create polls to
-// active, Read drops on 404/destroyed, Delete polls to gone, Update is the
-// unreachable RequiresReplace guard) and only contributes its own node-pool
-// schema attributes plus the spec mapping below. Every node-pool attribute
-// is RequiresReplace: there is no resize path, so any sizing change forces a
-// full recreate of the cluster.
+// It reuses the generic clusterResource implementation. Node-pool sizing is
+// updated in place; changing node CPU/RAM causes a controlled rolling
+// replacement of the affected pool, while the cluster identity is preserved.
 
 import (
 	"context"
@@ -20,7 +17,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -54,10 +50,8 @@ func NewDedicatedClusterResource() resource.Resource {
 	})
 }
 
-// dedicatedSizingAttributes returns the node-pool schema attributes that are
-// specific to kind=dedicated. Every attribute is RequiresReplace: there is no
-// in-place resize, so changing any of them forces a full recreation of the
-// cluster (the generic Update handler is an unreachable guard).
+// dedicatedSizingAttributes returns the in-place node-pool sizing attributes.
+// Only rke2_version remains replacement-only.
 func dedicatedSizingAttributes() map[string]schema.Attribute {
 	return map[string]schema.Attribute{
 		"cp_nodes": schema.Int64Attribute{
@@ -65,35 +59,24 @@ func dedicatedSizingAttributes() map[string]schema.Attribute {
 			Computed: true,
 			Default:  int64default.StaticInt64(3),
 			Description: "Number of control-plane nodes: 1 (single-node, non-HA) or 3 (HA). " +
-				"Defaults to 3. Changing it forces a new cluster (no resize path exists).",
+				"Defaults to 3. Changes resize the existing pool in place.",
 			Validators: []validator.Int64{
 				int64validator.OneOf(1, 3),
-			},
-			PlanModifiers: []planmodifier.Int64{
-				int64planmodifier.RequiresReplace(),
 			},
 		},
 		"cp_vcpu": schema.Int64Attribute{
 			Required: true,
 			Description: "vCPUs per control-plane node (required, at least 2; at least 4 for " +
-				"a single-node cluster without workers). " +
-				"Changing it forces a new cluster.",
+				"a single-node cluster without workers). Changes roll the control-plane pool.",
 			Validators: []validator.Int64{
 				int64validator.AtLeast(dedicatedMinCPVcpu),
 			},
-			PlanModifiers: []planmodifier.Int64{
-				int64planmodifier.RequiresReplace(),
-			},
 		},
 		"cp_ram_gb": schema.Int64Attribute{
-			Required: true,
-			Description: "RAM in GB per control-plane node (required, at least 8). " +
-				"Changing it forces a new cluster.",
+			Required:    true,
+			Description: "RAM in GB per control-plane node (required, at least 8). Changes roll the control-plane pool.",
 			Validators: []validator.Int64{
 				int64validator.AtLeast(dedicatedMinCPRamGB),
-			},
-			PlanModifiers: []planmodifier.Int64{
-				int64planmodifier.RequiresReplace(),
 			},
 		},
 		"worker_nodes": schema.Int64Attribute{
@@ -101,39 +84,27 @@ func dedicatedSizingAttributes() map[string]schema.Attribute {
 			Computed: true,
 			Default:  int64default.StaticInt64(0),
 			Description: "Number of worker nodes (default 0: a control-plane-only cluster with " +
-				"workloads scheduled on the control plane). Changing it forces a full " +
-				"recreation of the cluster — there is no in-place node-pool resize.",
+				"workloads scheduled on the control plane). Changes scale the existing pool in place.",
 			Validators: []validator.Int64{
 				int64validator.AtLeast(0),
-			},
-			PlanModifiers: []planmodifier.Int64{
-				int64planmodifier.RequiresReplace(),
 			},
 		},
 		"worker_vcpu": schema.Int64Attribute{
-			Optional: true,
-			Computed: true,
-			Default:  int64default.StaticInt64(0),
-			Description: "vCPUs per worker node (default 0). Changing it forces a full " +
-				"recreation of the cluster.",
+			Optional:    true,
+			Computed:    true,
+			Default:     int64default.StaticInt64(0),
+			Description: "vCPUs per worker node (default 0). Changes roll the worker pool.",
 			Validators: []validator.Int64{
 				int64validator.AtLeast(0),
-			},
-			PlanModifiers: []planmodifier.Int64{
-				int64planmodifier.RequiresReplace(),
 			},
 		},
 		"worker_ram_gb": schema.Int64Attribute{
-			Optional: true,
-			Computed: true,
-			Default:  int64default.StaticInt64(0),
-			Description: "RAM in GB per worker node (default 0). Changing it forces a full " +
-				"recreation of the cluster.",
+			Optional:    true,
+			Computed:    true,
+			Default:     int64default.StaticInt64(0),
+			Description: "RAM in GB per worker node (default 0). Changes roll the worker pool.",
 			Validators: []validator.Int64{
 				int64validator.AtLeast(0),
-			},
-			PlanModifiers: []planmodifier.Int64{
-				int64planmodifier.RequiresReplace(),
 			},
 		},
 		"pvc_storage_gb": schema.Int64Attribute{
@@ -141,13 +112,9 @@ func dedicatedSizingAttributes() map[string]schema.Attribute {
 			Computed: true,
 			Default:  int64default.StaticInt64(100),
 			Description: "Persistent-volume storage in GB available to the cluster (default 100, " +
-				"at least 50, in 50 GB steps). " +
-				"Changing it forces a new cluster.",
+				"at least 50, in 50 GB steps). Storage can only grow in place.",
 			Validators: []validator.Int64{
 				int64validator.AtLeast(dedicatedMinPVCStorageGB),
-			},
-			PlanModifiers: []planmodifier.Int64{
-				int64planmodifier.RequiresReplace(),
 			},
 		},
 		"rke2_version": schema.StringAttribute{
