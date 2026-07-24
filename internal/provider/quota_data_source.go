@@ -29,16 +29,22 @@ type quotaDataSource struct {
 }
 
 type quotaDataSourceModel struct {
-	MaxConcurrentEnvironments types.Int64 `tfsdk:"max_concurrent_environments"`
-	UsedEnvironments          types.Int64 `tfsdk:"used_environments"`
-	MaxVMs                    types.Int64 `tfsdk:"max_vms"`
-	UsedVMs                   types.Int64 `tfsdk:"used_vms"`
-	MaxVCPU                   types.Int64 `tfsdk:"max_vcpu"`
-	UsedVCPU                  types.Int64 `tfsdk:"used_vcpu"`
-	MaxRAMGB                  types.Int64 `tfsdk:"max_ram_gb"`
-	UsedRAMGB                 types.Int64 `tfsdk:"used_ram_gb"`
-	MaxPublicIPs              types.Int64 `tfsdk:"max_public_ips"`
-	UsedPublicIPs             types.Int64 `tfsdk:"used_public_ips"`
+	MaxConcurrentEnvironments  types.Int64 `tfsdk:"max_concurrent_environments"`
+	UsedEnvironments           types.Int64 `tfsdk:"used_environments"`
+	MaxVMs                     types.Int64 `tfsdk:"max_vms"`
+	UsedVMs                    types.Int64 `tfsdk:"used_vms"`
+	MaxVCPU                    types.Int64 `tfsdk:"max_vcpu"`
+	UsedVCPU                   types.Int64 `tfsdk:"used_vcpu"`
+	MaxRAMGB                   types.Int64 `tfsdk:"max_ram_gb"`
+	UsedRAMGB                  types.Int64 `tfsdk:"used_ram_gb"`
+	MaxPublicIPs               types.Int64 `tfsdk:"max_public_ips"`
+	UsedPublicIPs              types.Int64 `tfsdk:"used_public_ips"`
+	MaxHarborRobotAccounts     types.Int64 `tfsdk:"max_harbor_robot_accounts"`
+	UsedHarborRobotAccounts    types.Int64 `tfsdk:"used_harbor_robot_accounts"`
+	MaxHarborArtifacts         types.Int64 `tfsdk:"max_harbor_artifacts"`
+	UsedHarborArtifacts        types.Int64 `tfsdk:"used_harbor_artifacts"`
+	MaxHarborRegistryBindings  types.Int64 `tfsdk:"max_harbor_registry_bindings"`
+	UsedHarborRegistryBindings types.Int64 `tfsdk:"used_harbor_registry_bindings"`
 }
 
 func (d *quotaDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -53,16 +59,22 @@ func (d *quotaDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, 
 		Description: "Tenant usage vs. limits (GET /v1/quota). Limits are enforced server-side " +
 			"on every create; vCPU/RAM usage counts clusters and VMs together.",
 		Attributes: map[string]schema.Attribute{
-			"max_concurrent_environments": intAttr("Maximum number of concurrently active environments."),
-			"used_environments":           intAttr("Currently active environments."),
-			"max_vms":                     intAttr("Maximum number of non-terminal VMs."),
-			"used_vms":                    intAttr("Currently provisioned (non-terminal) VMs."),
-			"max_vcpu":                    intAttr("vCPU cap across clusters and VMs."),
-			"used_vcpu":                   intAttr("vCPUs in use across clusters and VMs."),
-			"max_ram_gb":                  intAttr("RAM cap in GiB across clusters and VMs."),
-			"used_ram_gb":                 intAttr("RAM in use (GiB) across clusters and VMs."),
-			"max_public_ips":              intAttr("Public IP cap for the tenant."),
-			"used_public_ips":             intAttr("Public IPs bound by environment resources."),
+			"max_concurrent_environments":   intAttr("Maximum number of concurrently active environments."),
+			"used_environments":             intAttr("Currently active environments."),
+			"max_vms":                       intAttr("Maximum number of non-terminal VMs."),
+			"used_vms":                      intAttr("Currently provisioned (non-terminal) VMs."),
+			"max_vcpu":                      intAttr("vCPU cap across clusters and VMs."),
+			"used_vcpu":                     intAttr("vCPUs in use across clusters and VMs."),
+			"max_ram_gb":                    intAttr("RAM cap in GiB across clusters and VMs."),
+			"used_ram_gb":                   intAttr("RAM in use (GiB) across clusters and VMs."),
+			"max_public_ips":                intAttr("Public IP cap for the tenant."),
+			"used_public_ips":               intAttr("Public IPs bound by environment resources."),
+			"max_harbor_robot_accounts":     intAttr("Maximum number of active Harbor robot accounts."),
+			"used_harbor_robot_accounts":    intAttr("Currently active Harbor robot accounts."),
+			"max_harbor_artifacts":          intAttr("Maximum number of active Harbor artifact registrations."),
+			"used_harbor_artifacts":         intAttr("Currently active Harbor artifact registrations."),
+			"max_harbor_registry_bindings":  intAttr("Maximum number of active Harbor registry bindings."),
+			"used_harbor_registry_bindings": intAttr("Currently active Harbor registry bindings."),
 		},
 	}
 }
@@ -93,16 +105,22 @@ func (d *quotaDataSource) Read(ctx context.Context, _ datasource.ReadRequest, re
 	}
 
 	model := quotaDataSourceModel{
-		MaxConcurrentEnvironments: types.Int64Value(q.MaxConcurrentEnvironments),
-		UsedEnvironments:          types.Int64Value(q.UsedEnvironments),
-		MaxVMs:                    types.Int64Value(q.MaxVMs),
-		UsedVMs:                   types.Int64Value(q.UsedVMs),
-		MaxVCPU:                   types.Int64Value(q.MaxVCPU),
-		UsedVCPU:                  types.Int64Value(q.UsedVCPU),
-		MaxRAMGB:                  types.Int64Value(q.MaxRAMGB),
-		UsedRAMGB:                 types.Int64Value(q.UsedRAMGB),
-		MaxPublicIPs:              types.Int64Value(q.MaxPublicIPs),
-		UsedPublicIPs:             types.Int64Value(q.UsedPublicIPs),
+		MaxConcurrentEnvironments:  types.Int64Value(q.MaxConcurrentEnvironments),
+		UsedEnvironments:           types.Int64Value(q.UsedEnvironments),
+		MaxVMs:                     types.Int64Value(q.MaxVMs),
+		UsedVMs:                    types.Int64Value(q.UsedVMs),
+		MaxVCPU:                    types.Int64Value(q.MaxVCPU),
+		UsedVCPU:                   types.Int64Value(q.UsedVCPU),
+		MaxRAMGB:                   types.Int64Value(q.MaxRAMGB),
+		UsedRAMGB:                  types.Int64Value(q.UsedRAMGB),
+		MaxPublicIPs:               types.Int64Value(q.MaxPublicIPs),
+		UsedPublicIPs:              types.Int64Value(q.UsedPublicIPs),
+		MaxHarborRobotAccounts:     types.Int64Value(q.MaxHarborRobotAccounts),
+		UsedHarborRobotAccounts:    types.Int64Value(q.UsedHarborRobotAccounts),
+		MaxHarborArtifacts:         types.Int64Value(q.MaxHarborArtifacts),
+		UsedHarborArtifacts:        types.Int64Value(q.UsedHarborArtifacts),
+		MaxHarborRegistryBindings:  types.Int64Value(q.MaxHarborRegistryBindings),
+		UsedHarborRegistryBindings: types.Int64Value(q.UsedHarborRegistryBindings),
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &model)...)
 }

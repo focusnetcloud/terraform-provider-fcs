@@ -47,6 +47,12 @@ func TestUnitQuotaDataSourceRead(t *testing.T) {
 	defer srv.Close()
 	srv.QuotaMaxVMs = 7
 	srv.QuotaMaxPublicIPs = 3
+	srv.QuotaMaxHarborRobotAccounts = 11
+	srv.QuotaUsedHarborRobotAccounts = 2
+	srv.QuotaMaxHarborArtifacts = 100
+	srv.QuotaUsedHarborArtifacts = 6
+	srv.QuotaMaxHarborRegistryBindings = 20
+	srv.QuotaUsedHarborRegistryBindings = 3
 
 	// One environment + one VM (4 vCPU / 8 GiB) of live usage.
 	c, _ := client.New(srv.URL, unitToken)
@@ -64,12 +70,18 @@ func TestUnitQuotaDataSourceRead(t *testing.T) {
 		t.Fatalf("read: %v", resp.Diagnostics)
 	}
 	checks := map[string]int64{
-		"max_vms":           7,
-		"max_public_ips":    3,
-		"used_environments": 1,
-		"used_vms":          1,
-		"used_vcpu":         4,
-		"used_ram_gb":       8,
+		"max_vms":                       7,
+		"max_public_ips":                3,
+		"used_environments":             1,
+		"used_vms":                      1,
+		"used_vcpu":                     4,
+		"used_ram_gb":                   8,
+		"max_harbor_robot_accounts":     11,
+		"used_harbor_robot_accounts":    2,
+		"max_harbor_artifacts":          100,
+		"used_harbor_artifacts":         6,
+		"max_harbor_registry_bindings":  20,
+		"used_harbor_registry_bindings": 3,
 	}
 	for attr, want := range checks {
 		var got int64

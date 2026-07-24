@@ -170,11 +170,17 @@ type Server struct {
 
 	// Quota limits returned by GET /v1/quota; usage is computed from live
 	// mock state.
-	QuotaMaxEnvironments int
-	QuotaMaxVMs          int
-	QuotaMaxVCPU         int
-	QuotaMaxRAMGB        int
-	QuotaMaxPublicIPs    int
+	QuotaMaxEnvironments            int
+	QuotaMaxVMs                     int
+	QuotaMaxVCPU                    int
+	QuotaMaxRAMGB                   int
+	QuotaMaxPublicIPs               int
+	QuotaMaxHarborRobotAccounts     int
+	QuotaUsedHarborRobotAccounts    int
+	QuotaMaxHarborArtifacts         int
+	QuotaUsedHarborArtifacts        int
+	QuotaMaxHarborRegistryBindings  int
+	QuotaUsedHarborRegistryBindings int
 
 	// Images is the catalog served by GET /v1/images and validated on VM
 	// create (unknown image -> 422, like the server).
@@ -303,9 +309,18 @@ var hostnamePrefixPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 var validClusterKinds = map[string]bool{"namespace": true, "flex": true, "business": true, "dedicated": true}
 
 type vm struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Image            string `json:"image,omitempty"`
+	HarborArtifactID string `json:"harbor_artifact_id,omitempty"`
+	CPUCores         int64  `json:"cpu_cores"`
+	MemoryGB         int64  `json:"memory_gb"`
+	DiskGB           int64  `json:"disk_gb"`
+	NICNetwork       string `json:"nic_network"`
+	Running          bool   `json:"running"`
+	VdcID            string `json:"vdc_id,omitempty"`
+	NetworkID        string `json:"network_id,omitempty"`
+	Status           string `json:"status"`
 	// VMIP/ConsoleURL are pointers so the mock serializes JSON null until
 	// the values exist — exactly like the server (to_contract: vm_ip null
 	// until Ready+IP, console_url null until the console broker is available).
@@ -331,6 +346,7 @@ type VmStatus struct {
 
 type vmSpec struct {
 	Image                string `json:"image"`
+	HarborArtifactID     string `json:"harbor_artifact_id"`
 	Name                 string `json:"name"`
 	CPUCores             int64  `json:"cpu_cores"`
 	MemoryGB             int64  `json:"memory_gb"`
@@ -502,20 +518,23 @@ type iaasNetworkSpec struct {
 // New starts a mock server expecting the given bearer token.
 func New(token string) *Server {
 	s := &Server{
-		Token:                     token,
-		EnvGoneAfterGETs:          1,
-		ClusterReadyAfterGETs:     2,
-		ClusterGoneAfterGETs:      1,
-		VmReadyAfterGETs:          2,
-		VmGoneAfterGETs:           1,
-		IngressGoneAfterGETs:      1,
-		EgressGoneAfterGETs:       1,
-		IaasNetworkReadyAfterGETs: 2,
-		QuotaMaxEnvironments:      25,
-		QuotaMaxVMs:               10,
-		QuotaMaxVCPU:              32,
-		QuotaMaxRAMGB:             64,
-		QuotaMaxPublicIPs:         2,
+		Token:                          token,
+		EnvGoneAfterGETs:               1,
+		ClusterReadyAfterGETs:          2,
+		ClusterGoneAfterGETs:           1,
+		VmReadyAfterGETs:               2,
+		VmGoneAfterGETs:                1,
+		IngressGoneAfterGETs:           1,
+		EgressGoneAfterGETs:            1,
+		IaasNetworkReadyAfterGETs:      2,
+		QuotaMaxEnvironments:           25,
+		QuotaMaxVMs:                    10,
+		QuotaMaxVCPU:                   32,
+		QuotaMaxRAMGB:                  64,
+		QuotaMaxPublicIPs:              2,
+		QuotaMaxHarborRobotAccounts:    10,
+		QuotaMaxHarborArtifacts:        100,
+		QuotaMaxHarborRegistryBindings: 20,
 		Images: []Image{
 			{Name: "ubuntu-22.04", DisplayName: "Ubuntu 22.04 LTS", Source: "catalog"},
 			{Name: "coriolis-worker-ubuntu2204-qga", DisplayName: "Ubuntu 22.04 LTS (QGA)", Source: "catalog"},
@@ -1260,11 +1279,13 @@ func (s *Server) handleVmCollectionLocked(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var spec vmSpec
-	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil || spec.Image == "" {
-		writeError(w, http.StatusBadRequest, "invalid vm spec: image is required", "BadRequest")
+	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil ||
+		(spec.Image == "") == (spec.HarborArtifactID == "") {
+		writeError(w, http.StatusBadRequest,
+			"invalid vm spec: exactly one of image or harbor_artifact_id is required", "BadRequest")
 		return
 	}
-	if !s.imageInCatalogLocked(spec.Image) {
+	if spec.Image != "" && !s.imageInCatalogLocked(spec.Image) {
 		writeError(w, http.StatusUnprocessableEntity,
 			fmt.Sprintf("image %q is not in the catalog", spec.Image), "ImageNotAllowed")
 		return
@@ -1279,11 +1300,32 @@ func (s *Server) handleVmCollectionLocked(w http.ResponseWriter, r *http.Request
 		}
 	}
 	v := &vm{
-		ID:     newUUID(),
-		Name:   spec.Name,
-		Status: "provisioning",
-		envID:  env.ID,
-		spec:   spec,
+		ID:               newUUID(),
+		Name:             spec.Name,
+		Image:            spec.Image,
+		HarborArtifactID: spec.HarborArtifactID,
+		CPUCores:         spec.CPUCores,
+		MemoryGB:         spec.MemoryGB,
+		DiskGB:           spec.DiskGB,
+		NICNetwork:       spec.NICNetwork,
+		Running:          spec.running(),
+		VdcID:            spec.VdcID,
+		NetworkID:        spec.NetworkID,
+		Status:           "provisioning",
+		envID:            env.ID,
+		spec:             spec,
+	}
+	if v.CPUCores == 0 {
+		v.CPUCores = 2
+	}
+	if v.MemoryGB == 0 {
+		v.MemoryGB = 4
+	}
+	if v.DiskGB == 0 {
+		v.DiskGB = 20
+	}
+	if v.NICNetwork == "" {
+		v.NICNetwork = "tenant"
 	}
 	if v.Name == "" {
 		v.Name = "vm-" + v.ID[:8] // server-generated name
@@ -1360,8 +1402,10 @@ func (s *Server) handleVmPowerLocked(w http.ResponseWriter, r *http.Request, env
 	switch payload.Action {
 	case "stop":
 		v.Status = "stopped"
+		v.Running = false
 	case "start":
 		v.Status = "active"
+		v.Running = true
 		if v.VMIP == nil {
 			v.VMIP = strPtr("10.0.0." + fmt.Sprint(10+len(s.vms)))
 		}
@@ -2185,16 +2229,22 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 		usedRAM += int(cl.spec.RAMGB)
 	}
 	writeJSON(w, http.StatusOK, map[string]int{
-		"max_concurrent_environments": s.QuotaMaxEnvironments,
-		"used_environments":           s.liveEnvCountLocked(),
-		"max_vms":                     s.QuotaMaxVMs,
-		"used_vms":                    usedVMs,
-		"max_vcpu":                    s.QuotaMaxVCPU,
-		"used_vcpu":                   usedVCPU,
-		"max_ram_gb":                  s.QuotaMaxRAMGB,
-		"used_ram_gb":                 usedRAM,
-		"max_public_ips":              s.QuotaMaxPublicIPs,
-		"used_public_ips":             0,
+		"max_concurrent_environments":   s.QuotaMaxEnvironments,
+		"used_environments":             s.liveEnvCountLocked(),
+		"max_vms":                       s.QuotaMaxVMs,
+		"used_vms":                      usedVMs,
+		"max_vcpu":                      s.QuotaMaxVCPU,
+		"used_vcpu":                     usedVCPU,
+		"max_ram_gb":                    s.QuotaMaxRAMGB,
+		"used_ram_gb":                   usedRAM,
+		"max_public_ips":                s.QuotaMaxPublicIPs,
+		"used_public_ips":               0,
+		"max_harbor_robot_accounts":     s.QuotaMaxHarborRobotAccounts,
+		"used_harbor_robot_accounts":    s.QuotaUsedHarborRobotAccounts,
+		"max_harbor_artifacts":          s.QuotaMaxHarborArtifacts,
+		"used_harbor_artifacts":         s.QuotaUsedHarborArtifacts,
+		"max_harbor_registry_bindings":  s.QuotaMaxHarborRegistryBindings,
+		"used_harbor_registry_bindings": s.QuotaUsedHarborRegistryBindings,
 	})
 }
 

@@ -13,16 +13,22 @@ import (
 
 // Quota mirrors the Quota contract schema.
 type Quota struct {
-	MaxConcurrentEnvironments int64 `json:"max_concurrent_environments"`
-	UsedEnvironments          int64 `json:"used_environments"`
-	MaxVMs                    int64 `json:"max_vms"`
-	UsedVMs                   int64 `json:"used_vms"`
-	MaxVCPU                   int64 `json:"max_vcpu"`
-	UsedVCPU                  int64 `json:"used_vcpu"`
-	MaxRAMGB                  int64 `json:"max_ram_gb"`
-	UsedRAMGB                 int64 `json:"used_ram_gb"`
-	MaxPublicIPs              int64 `json:"max_public_ips"`
-	UsedPublicIPs             int64 `json:"used_public_ips"`
+	MaxConcurrentEnvironments  int64 `json:"max_concurrent_environments"`
+	UsedEnvironments           int64 `json:"used_environments"`
+	MaxVMs                     int64 `json:"max_vms"`
+	UsedVMs                    int64 `json:"used_vms"`
+	MaxVCPU                    int64 `json:"max_vcpu"`
+	UsedVCPU                   int64 `json:"used_vcpu"`
+	MaxRAMGB                   int64 `json:"max_ram_gb"`
+	UsedRAMGB                  int64 `json:"used_ram_gb"`
+	MaxPublicIPs               int64 `json:"max_public_ips"`
+	UsedPublicIPs              int64 `json:"used_public_ips"`
+	MaxHarborRobotAccounts     int64 `json:"max_harbor_robot_accounts"`
+	UsedHarborRobotAccounts    int64 `json:"used_harbor_robot_accounts"`
+	MaxHarborArtifacts         int64 `json:"max_harbor_artifacts"`
+	UsedHarborArtifacts        int64 `json:"used_harbor_artifacts"`
+	MaxHarborRegistryBindings  int64 `json:"max_harbor_registry_bindings"`
+	UsedHarborRegistryBindings int64 `json:"used_harbor_registry_bindings"`
 }
 
 // Image mirrors the Image schema.

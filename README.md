@@ -18,6 +18,9 @@ Current scope:
 - `fcs_published_app`
 - `fcs_environment_ingress`
 - `fcs_environment_egress`
+- `fcs_harbor_robot_account`
+- `fcs_harbor_artifact`
+- `fcs_harbor_registry_binding`
 - `fcs_quota` and `fcs_images` data sources
 - ephemeral `fcs_cluster_kubeconfig` credentials for Terraform >= 1.10
 
@@ -64,6 +67,25 @@ The `examples/published-app` configuration covers the customer-facing Free/Flex
 app publishing path. Terraform manages the public app intent; Kubernetes
 Deployment and Service objects are still managed inside the namespace or
 vcluster.
+
+The `examples/harbor` configuration manages a least-privilege Robot Account and
+registers an existing OCI artifact in the tenant's private Harbor project.
+Image bytes are transferred with standard OCI tools such as Docker, Podman,
+Skopeo, ORAS or Crane; Terraform manages credentials and digest-pinned
+lifecycle metadata, not registry layers. Destroying an artifact registration
+does not delete its Harbor manifest or layers.
+
+The `examples/harbor-kubernetes` configuration composes a digest-pinned Harbor
+artifact and a secret-free registry binding with the official Kubernetes
+provider. The cluster credential is supplied by the ephemeral
+`fcs_cluster_kubeconfig` resource and is not persisted in state. The same
+ephemeral provider configuration can be used with the official Helm provider.
+
+The `examples/harbor-vm` configuration boots a persistent VM from a
+CDI-compatible, digest-pinned `vm_disk` artifact. The API creates the
+Harbor/CDI pull credential entirely server-side; no internal credential enters
+Terraform state. The complete push, pull, container and VM workflow is
+documented in [`examples/harbor/README.md`](examples/harbor/README.md).
 
 ## Provider configuration
 

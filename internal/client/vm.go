@@ -21,11 +21,30 @@ import (
 // null leaves the zero value, so both surface as empty strings here and
 // the provider maps them to null state attributes.
 type Vm struct {
-	ID         string `json:"id"`
-	Name       string `json:"name,omitempty"`
-	Status     string `json:"status"`
-	VMIP       string `json:"vm_ip"`
-	ConsoleURL string `json:"console_url"`
+	ID               string  `json:"id"`
+	Name             string  `json:"name,omitempty"`
+	Image            string  `json:"image,omitempty"`
+	HarborArtifactID string  `json:"harbor_artifact_id,omitempty"`
+	CPUCores         *int64  `json:"cpu_cores,omitempty"`
+	MemoryGB         *int64  `json:"memory_gb,omitempty"`
+	DiskGB           *int64  `json:"disk_gb,omitempty"`
+	NICNetwork       *string `json:"nic_network,omitempty"`
+	Running          *bool   `json:"running,omitempty"`
+	VdcID            *string `json:"vdc_id,omitempty"`
+	NetworkID        *string `json:"network_id,omitempty"`
+	Status           string  `json:"status"`
+	VMIP             string  `json:"vm_ip"`
+	ConsoleURL       string  `json:"console_url"`
+}
+
+// VmStatus is the live KubeVirt status returned by the VM status endpoint.
+// Unlike Vm.Status, Phase reflects the observed VMI state and can therefore
+// be used to settle asynchronous power operations.
+type VmStatus struct {
+	Phase         string  `json:"phase"`
+	Reason        *string `json:"reason"`
+	Message       string  `json:"message"`
+	PlatformError bool    `json:"platform_error"`
 }
 
 // VmSpec is the create payload (VmSpec schema). Zero values are omitted so
@@ -33,7 +52,8 @@ type Vm struct {
 // nic_network=tenant). Running is a pointer because false is a meaningful
 // value distinct from "unset" (server default: true).
 type VmSpec struct {
-	Image                string `json:"image"`
+	Image                string `json:"image,omitempty"`
+	HarborArtifactID     string `json:"harbor_artifact_id,omitempty"`
 	Name                 string `json:"name,omitempty"`
 	CPUCores             int64  `json:"cpu_cores,omitempty"`
 	MemoryGB             int64  `json:"memory_gb,omitempty"`
@@ -92,6 +112,26 @@ func (c *Client) GetVm(ctx context.Context, envID, vmID string) (*Vm, error) {
 		return nil, fmt.Errorf("decoding vm: %w", err)
 	}
 	return &vm, nil
+}
+
+// GetVmStatus reads the live KubeVirt phase for a VM. A 404 (unknown,
+// destroyed or foreign tenant) is returned as an APIError.
+func (c *Client) GetVmStatus(ctx context.Context, envID, vmID string) (*VmStatus, error) {
+	status, body, err := c.do(ctx, http.MethodGet, vmItemPath(envID, vmID)+"/status", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, apiError(status, body)
+	}
+	var vmStatus VmStatus
+	if err := json.Unmarshal(body, &vmStatus); err != nil {
+		return nil, fmt.Errorf("decoding vm status: %w", err)
+	}
+	if vmStatus.Phase == "" {
+		return nil, fmt.Errorf("vm status response did not include a phase")
+	}
+	return &vmStatus, nil
 }
 
 // DeleteVm DELETEs /v1/environments/{id}/vms/{vmId}. 202 (teardown
