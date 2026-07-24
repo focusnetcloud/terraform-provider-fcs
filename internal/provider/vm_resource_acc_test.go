@@ -154,6 +154,74 @@ resource "fcs_vm" "test" {
 				Config:   config,
 				PlanOnly: true,
 			},
+			{
+				ResourceName:      "fcs_vm.test",
+				Config:            config,
+				ImportState:       true,
+				ImportStateIdFunc: clusterCompositeImportID("fcs_vm.test"),
+				ImportStateVerify: true,
+				ImportStateVerifyIgnore: []string{
+					"timeouts",
+				},
+			},
+			{
+				Config:   config,
+				PlanOnly: true,
+			},
+		},
+	})
+}
+
+func TestAccVmHarborArtifactLifecycle(t *testing.T) {
+	srv := fastVmMock(t)
+	artifactID := "3e8e9a70-1657-47c8-a067-e6a0cf9ac797"
+	config := accProviderConfig(srv.URL, accToken) + `
+resource "fcs_environment" "test" {
+  name = "lab-vm-harbor"
+}
+
+resource "fcs_vm" "test" {
+  environment_id     = fcs_environment.test.id
+  harbor_artifact_id = "` + artifactID + `"
+  name               = "harbor-target"
+}
+`
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6Factories(),
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckNoResourceAttr(
+						"fcs_vm.test", "image",
+					),
+					resource.TestCheckResourceAttr(
+						"fcs_vm.test", "harbor_artifact_id", artifactID,
+					),
+					resource.TestCheckResourceAttr(
+						"fcs_vm.test", "status", "active",
+					),
+				),
+			},
+			{
+				Config:   config,
+				PlanOnly: true,
+			},
+			{
+				ResourceName:      "fcs_vm.test",
+				Config:            config,
+				ImportState:       true,
+				ImportStateIdFunc: clusterCompositeImportID("fcs_vm.test"),
+				ImportStateVerify: true,
+				ImportStateVerifyIgnore: []string{
+					"timeouts",
+				},
+			},
+			{
+				Config:   config,
+				PlanOnly: true,
+			},
 		},
 	})
 }

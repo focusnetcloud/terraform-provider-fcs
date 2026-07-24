@@ -18,11 +18,17 @@ Tenant usage vs. limits (GET /v1/quota). Limits are enforced server-side on ever
 ### Read-Only
 
 - `max_concurrent_environments` (Number) Maximum number of concurrently active environments.
+- `max_harbor_artifacts` (Number) Maximum number of active Harbor artifact registrations.
+- `max_harbor_registry_bindings` (Number) Maximum number of active Harbor registry bindings.
+- `max_harbor_robot_accounts` (Number) Maximum number of active Harbor robot accounts.
 - `max_public_ips` (Number) Public IP cap for the tenant.
 - `max_ram_gb` (Number) RAM cap in GiB across clusters and VMs.
 - `max_vcpu` (Number) vCPU cap across clusters and VMs.
 - `max_vms` (Number) Maximum number of non-terminal VMs.
 - `used_environments` (Number) Currently active environments.
+- `used_harbor_artifacts` (Number) Currently active Harbor artifact registrations.
+- `used_harbor_registry_bindings` (Number) Currently active Harbor registry bindings.
+- `used_harbor_robot_accounts` (Number) Currently active Harbor robot accounts.
 - `used_public_ips` (Number) Public IPs bound by environment resources.
 - `used_ram_gb` (Number) RAM in use (GiB) across clusters and VMs.
 - `used_vcpu` (Number) vCPUs in use across clusters and VMs.

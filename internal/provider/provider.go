@@ -119,6 +119,9 @@ func (p *fcsProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewPublishedAppResource,
 		NewIngressResource,
 		NewEgressResource,
+		NewHarborRobotAccountResource,
+		NewHarborArtifactResource,
+		NewHarborRegistryBindingResource,
 	}
 }
 

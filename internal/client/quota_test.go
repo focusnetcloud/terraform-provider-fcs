@@ -16,6 +16,12 @@ func TestGetQuotaLimitsAndUsage(t *testing.T) {
 	defer srv.Close()
 	srv.QuotaMaxVMs = 5
 	srv.QuotaMaxVCPU = 16
+	srv.QuotaMaxHarborRobotAccounts = 12
+	srv.QuotaUsedHarborRobotAccounts = 3
+	srv.QuotaMaxHarborArtifacts = 100
+	srv.QuotaUsedHarborArtifacts = 7
+	srv.QuotaMaxHarborRegistryBindings = 20
+	srv.QuotaUsedHarborRegistryBindings = 4
 	c := newTestClient(t, srv.URL, testToken)
 
 	q, err := c.GetQuota(context.Background())
@@ -24,6 +30,27 @@ func TestGetQuotaLimitsAndUsage(t *testing.T) {
 	}
 	if q.MaxVMs != 5 || q.MaxVCPU != 16 {
 		t.Fatalf("expected configured limits 5/16, got %d/%d", q.MaxVMs, q.MaxVCPU)
+	}
+	if q.MaxHarborRobotAccounts != 12 || q.UsedHarborRobotAccounts != 3 {
+		t.Fatalf(
+			"expected configured Harbor robot quota 12/3, got %d/%d",
+			q.MaxHarborRobotAccounts,
+			q.UsedHarborRobotAccounts,
+		)
+	}
+	if q.MaxHarborArtifacts != 100 || q.UsedHarborArtifacts != 7 {
+		t.Fatalf(
+			"expected configured Harbor artifact quota 100/7, got %d/%d",
+			q.MaxHarborArtifacts,
+			q.UsedHarborArtifacts,
+		)
+	}
+	if q.MaxHarborRegistryBindings != 20 || q.UsedHarborRegistryBindings != 4 {
+		t.Fatalf(
+			"expected configured Harbor binding quota 20/4, got %d/%d",
+			q.MaxHarborRegistryBindings,
+			q.UsedHarborRegistryBindings,
+		)
 	}
 	if q.UsedEnvironments != 0 || q.UsedVMs != 0 {
 		t.Fatalf("expected zero usage on a fresh mock, got %+v", q)

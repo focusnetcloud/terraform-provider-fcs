@@ -3,12 +3,12 @@
 page_title: "fcs_vm Resource - FCS"
 subcategory: ""
 description: |-
-  A standalone VM in the persistent tenant network, brokered by the FCS API. Create is asynchronous: the provider polls until the VM reaches its desired power state. All attributes except running force replacement.
+  A standalone VM in the persistent tenant network, brokered by the FCS API. Create is asynchronous: the provider polls until the VM reaches its desired power state. All attributes except running force replacement. After a create timeout, verify the VM through the API: untaint a healthy tracked VM and import only when it is absent from state. Because the API never returns cloud-init payloads, imported VMs that originally used cloud-init must ignore changes to those sensitive attributes.
 ---
 
 # fcs_vm (Resource)
 
-A standalone VM in the persistent tenant network, brokered by the FCS API. Create is asynchronous: the provider polls until the VM reaches its desired power state. All attributes except `running` force replacement.
+A standalone VM in the persistent tenant network, brokered by the FCS API. Create is asynchronous: the provider polls until the VM reaches its desired power state. All attributes except `running` force replacement. After a create timeout, verify the VM through the API: untaint a healthy tracked VM and import only when it is absent from state. Because the API never returns cloud-init payloads, imported VMs that originally used cloud-init must ignore changes to those sensitive attributes.
 
 
 
@@ -18,7 +18,6 @@ A standalone VM in the persistent tenant network, brokered by the FCS API. Creat
 ### Required
 
 - `environment_id` (String) ID of the fcs_environment hosting this VM. Changing it forces a new VM.
-- `image` (String) Catalog image name (see the fcs_images data source). Changing it forces a new VM.
 
 ### Optional
 
@@ -26,6 +25,8 @@ A standalone VM in the persistent tenant network, brokered by the FCS API. Creat
 - `cloud_init_userdata` (String, Sensitive) cloud-init user-data (sensitive). Changing it forces a new VM.
 - `cpu_cores` (Number) vCPU cores (default 2). Changing it forces a new VM.
 - `disk_gb` (Number) Root disk size in GiB (default 20). Changing it forces a new VM.
+- `harbor_artifact_id` (String) ID of an active fcs_harbor_artifact with kind vm_disk. The API imports its digest-pinned OCI artifact through CDI. Exactly one of image or harbor_artifact_id must be set. Changing it forces a new VM.
+- `image` (String) Catalog image name (see the fcs_images data source). Exactly one of image or harbor_artifact_id must be set. Changing it forces a new VM.
 - `memory_gb` (Number) Guest memory in GiB (default 4). Changing it forces a new VM.
 - `name` (String) VM name; idempotency key per environment. Server-generated when unset. Changing it forces a new VM.
 - `network_id` (String) Optional IaaS-vDC network ID for standalone IaaS VM network binding. The network must be active server-side. Must be set together with vdc_id. Changing it forces a new VM.
@@ -48,3 +49,14 @@ Optional:
 
 - `create` (String) How long to wait for the VM to reach its desired power state (default 15m0s). Accepts a duration string such as "30m".
 - `delete` (String) How long to wait for the teardown to finish (GET returns 404 or status=destroyed; default 15m0s).
+- `update` (String) How long to wait for an in-place stop/start to reach its observed KubeVirt power state (default 5m0s). If an update times out, verify the live VM status before retrying because the accepted operation may still converge.
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+terraform import fcs_vm.example 11111111-2222-4333-8444-555555555555/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
+```

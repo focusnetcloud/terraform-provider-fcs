@@ -5,9 +5,13 @@ package provider
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	fwschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -102,6 +106,345 @@ func vmCreateAttrs(envID string, overrides map[string]tftypes.Value) map[string]
 		attrs[k] = v
 	}
 	return attrs
+}
+
+func validateVmConfig(t *testing.T, attrs map[string]tftypes.Value) resource.ValidateConfigResponse {
+	t.Helper()
+	r := NewVmResource().(*vmResource)
+	s := vmSchema(t, r)
+	resp := resource.ValidateConfigResponse{}
+	r.ValidateConfig(
+		context.Background(),
+		resource.ValidateConfigRequest{
+			Config: tfsdk.Config{Schema: s, Raw: vmValue(t, s, attrs)},
+		},
+		&resp,
+	)
+	return resp
+}
+
+func TestUnitVmSchemaAndValidationRequireExactlyOneImageSource(t *testing.T) {
+	r := NewVmResource().(*vmResource)
+	s := vmSchema(t, r)
+
+	image, ok := s.Attributes["image"]
+	if !ok {
+		t.Fatal("image attribute missing")
+	}
+	if !image.IsOptional() || image.IsRequired() {
+		t.Fatal("image must be optional when harbor_artifact_id is available")
+	}
+	artifact, ok := s.Attributes["harbor_artifact_id"]
+	if !ok {
+		t.Fatal("harbor_artifact_id attribute missing")
+	}
+	if !artifact.IsOptional() || artifact.IsRequired() {
+		t.Fatal("harbor_artifact_id must be optional")
+	}
+
+	envID := "2abf4a32-53a0-4277-8e40-caf72226db19"
+	artifactID := "3e8e9a70-1657-47c8-a067-e6a0cf9ac797"
+	cases := []struct {
+		name      string
+		attrs     map[string]tftypes.Value
+		wantError bool
+	}{
+		{
+			name:      "catalog_image",
+			attrs:     vmCreateAttrs(envID, nil),
+			wantError: false,
+		},
+		{
+			name: "harbor_artifact",
+			attrs: vmCreateAttrs(envID, map[string]tftypes.Value{
+				"image":              tftypes.NewValue(tftypes.String, nil),
+				"harbor_artifact_id": tftypes.NewValue(tftypes.String, artifactID),
+			}),
+			wantError: false,
+		},
+		{
+			name: "neither",
+			attrs: vmCreateAttrs(envID, map[string]tftypes.Value{
+				"image": tftypes.NewValue(tftypes.String, nil),
+			}),
+			wantError: true,
+		},
+		{
+			name: "both",
+			attrs: vmCreateAttrs(envID, map[string]tftypes.Value{
+				"harbor_artifact_id": tftypes.NewValue(tftypes.String, artifactID),
+			}),
+			wantError: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := validateVmConfig(t, tc.attrs)
+			if got := resp.Diagnostics.HasError(); got != tc.wantError {
+				t.Fatalf("validation error=%v, want %v: %v", got, tc.wantError, resp.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestUnitVmImportSetsCompositeIdentity(t *testing.T) {
+	r := NewVmResource().(*vmResource)
+	if _, ok := any(r).(resource.ResourceWithImportState); !ok {
+		t.Fatal("fcs_vm does not implement ResourceWithImportState")
+	}
+	s := vmSchema(t, r)
+	objType := s.Type().TerraformType(context.Background()).(tftypes.Object)
+	resp := resource.ImportStateResponse{
+		State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)},
+	}
+
+	r.ImportState(
+		context.Background(),
+		resource.ImportStateRequest{ID: "env-123/vm-456"},
+		&resp,
+	)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("import diagnostics: %v", resp.Diagnostics)
+	}
+	if got := stateString(t, resp.State, "environment_id"); got != "env-123" {
+		t.Fatalf("environment_id = %q, want env-123", got)
+	}
+	if got := stateString(t, resp.State, "id"); got != "vm-456" {
+		t.Fatalf("id = %q, want vm-456", got)
+	}
+}
+
+func TestUnitVmImportRejectsInvalidCompositeIdentity(t *testing.T) {
+	r := NewVmResource().(*vmResource)
+	s := vmSchema(t, r)
+	objType := s.Type().TerraformType(context.Background()).(tftypes.Object)
+
+	for _, id := range []string{"", "vm-only", "/vm", "env/", "env/vm/extra"} {
+		t.Run(id, func(t *testing.T) {
+			resp := resource.ImportStateResponse{
+				State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)},
+			}
+			r.ImportState(
+				context.Background(),
+				resource.ImportStateRequest{ID: id},
+				&resp,
+			)
+			if !resp.Diagnostics.HasError() {
+				t.Fatalf("expected invalid import ID %q to fail", id)
+			}
+		})
+	}
+}
+
+func TestUnitVmImportReadReconstructsNonSecretConfiguration(t *testing.T) {
+	srv := mockapi.New(unitToken)
+	defer srv.Close()
+	srv.VmReadyAfterGETs = 1
+	envID := unitEnv(t, srv, "lab-vm-import-read")
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	running := true
+	created, err := c.CreateVm(context.Background(), envID, client.VmSpec{
+		HarborArtifactID: "3e8e9a70-1657-47c8-a067-e6a0cf9ac797",
+		Name:             "imported-harbor-vm",
+		CPUCores:         3,
+		MemoryGB:         7,
+		DiskGB:           42,
+		NICNetwork:       "tenant",
+		Running:          &running,
+	})
+	if err != nil {
+		t.Fatalf("CreateVm: %v", err)
+	}
+
+	r := newUnitVmResource(t, srv)
+	s := vmSchema(t, r)
+	objType := s.Type().TerraformType(context.Background()).(tftypes.Object)
+	importResp := resource.ImportStateResponse{
+		State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)},
+	}
+	r.ImportState(
+		context.Background(),
+		resource.ImportStateRequest{ID: envID + "/" + created.ID},
+		&importResp,
+	)
+	if importResp.Diagnostics.HasError() {
+		t.Fatalf("import diagnostics: %v", importResp.Diagnostics)
+	}
+
+	readResp := resource.ReadResponse{State: importResp.State}
+	r.Read(
+		context.Background(),
+		resource.ReadRequest{State: importResp.State},
+		&readResp,
+	)
+	if readResp.Diagnostics.HasError() {
+		t.Fatalf("read diagnostics: %v", readResp.Diagnostics)
+	}
+	if got := stateString(t, readResp.State, "name"); got != "imported-harbor-vm" {
+		t.Fatalf("name = %q", got)
+	}
+	if got := stateString(t, readResp.State, "harbor_artifact_id"); got != "3e8e9a70-1657-47c8-a067-e6a0cf9ac797" {
+		t.Fatalf("harbor_artifact_id = %q", got)
+	}
+	if got := stateInt64(t, readResp.State, "cpu_cores"); got != 3 {
+		t.Fatalf("cpu_cores = %d", got)
+	}
+	if got := stateInt64(t, readResp.State, "memory_gb"); got != 7 {
+		t.Fatalf("memory_gb = %d", got)
+	}
+	if got := stateInt64(t, readResp.State, "disk_gb"); got != 42 {
+		t.Fatalf("disk_gb = %d", got)
+	}
+	if got := stateString(t, readResp.State, "nic_network"); got != "tenant" {
+		t.Fatalf("nic_network = %q", got)
+	}
+	if !stateBool(t, readResp.State, "running") {
+		t.Fatal("running = false, want true")
+	}
+}
+
+func TestUnitVmImportRejectsAPIWithoutSpecReadback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"vm-old",
+			"name":"legacy",
+			"image":"ubuntu-22.04",
+			"status":"active",
+			"vm_ip":"10.0.0.10"
+		}`))
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	r := NewVmResource().(*vmResource)
+	r.client = c
+	s := vmSchema(t, r)
+	objType := s.Type().TerraformType(context.Background()).(tftypes.Object)
+	importResp := resource.ImportStateResponse{
+		State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)},
+	}
+	r.ImportState(
+		context.Background(),
+		resource.ImportStateRequest{ID: "env-old/vm-old"},
+		&importResp,
+	)
+
+	readResp := resource.ReadResponse{State: importResp.State}
+	r.Read(context.Background(), resource.ReadRequest{State: importResp.State}, &readResp)
+	if !readResp.Diagnostics.HasError() {
+		t.Fatal("import against API without VM spec readback must fail closed")
+	}
+	if got := readResp.Diagnostics.Errors()[0].Detail(); !strings.Contains(got, "does not include") {
+		t.Fatalf("unexpected diagnostic: %s", got)
+	}
+}
+
+func TestUnitVmManagedReadPreservesConfigurationFromOldAPI(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"vm-old",
+			"name":"legacy",
+			"image":"ubuntu-22.04",
+			"status":"active",
+			"vm_ip":"10.0.0.10"
+		}`))
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL, unitToken)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	r := NewVmResource().(*vmResource)
+	r.client = c
+	s := vmSchema(t, r)
+	raw := vmValue(t, s, vmCreateAttrs("env-old", map[string]tftypes.Value{
+		"id":          tftypes.NewValue(tftypes.String, "vm-old"),
+		"name":        tftypes.NewValue(tftypes.String, "legacy"),
+		"status":      tftypes.NewValue(tftypes.String, "provisioning"),
+		"vm_ip":       tftypes.NewValue(tftypes.String, nil),
+		"console_url": tftypes.NewValue(tftypes.String, nil),
+	}))
+	state := tfsdk.State{Schema: s, Raw: raw}
+
+	readResp := resource.ReadResponse{State: state}
+	r.Read(context.Background(), resource.ReadRequest{State: state}, &readResp)
+	if readResp.Diagnostics.HasError() {
+		t.Fatalf("managed read diagnostics: %v", readResp.Diagnostics)
+	}
+	if got := stateString(t, readResp.State, "image"); got != "ubuntu-22.04" {
+		t.Fatalf("image = %q", got)
+	}
+	if got := stateInt64(t, readResp.State, "cpu_cores"); got != 2 {
+		t.Fatalf("cpu_cores = %d", got)
+	}
+	if got := stateString(t, readResp.State, "status"); got != "active" {
+		t.Fatalf("status = %q", got)
+	}
+}
+
+func TestSetVmObservedStateDoesNotOverwritePlannedConfiguration(t *testing.T) {
+	r := NewVmResource().(*vmResource)
+	s := vmSchema(t, r)
+	raw := vmValue(t, s, vmCreateAttrs("env-normalized", map[string]tftypes.Value{
+		"id":          tftypes.NewValue(tftypes.String, "vm-normalized"),
+		"name":        tftypes.NewValue(tftypes.String, "normalized"),
+		"status":      tftypes.NewValue(tftypes.String, "provisioning"),
+		"vm_ip":       tftypes.NewValue(tftypes.String, nil),
+		"console_url": tftypes.NewValue(tftypes.String, nil),
+	}))
+	state := tfsdk.State{Schema: s, Raw: raw}
+	normalizedNetwork := "iaas-vdc"
+	var diags diag.Diagnostics
+
+	setVmState(context.Background(), &state, &client.Vm{
+		ID:         "vm-normalized",
+		Status:     "active",
+		NICNetwork: &normalizedNetwork,
+	}, &diags)
+	if diags.HasError() {
+		t.Fatalf("setVmState diagnostics: %v", diags)
+	}
+	if got := stateString(t, state, "nic_network"); got != "tenant" {
+		t.Fatalf("nic_network = %q, want planned tenant", got)
+	}
+}
+
+func TestUnitVmCreateFromHarborArtifactOmitsCatalogImage(t *testing.T) {
+	srv := mockapi.New(unitToken)
+	defer srv.Close()
+	envID := unitEnv(t, srv, "lab-vm-harbor")
+	r := newUnitVmResource(t, srv)
+	s := vmSchema(t, r)
+	artifactID := "3e8e9a70-1657-47c8-a067-e6a0cf9ac797"
+
+	resp := runVmCreate(t, r, s, vmValue(t, s, vmCreateAttrs(envID, map[string]tftypes.Value{
+		"name":               tftypes.NewValue(tftypes.String, "harbor-target"),
+		"image":              tftypes.NewValue(tftypes.String, nil),
+		"harbor_artifact_id": tftypes.NewValue(tftypes.String, artifactID),
+	})))
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("create diagnostics: %v", resp.Diagnostics)
+	}
+	spec, ok := srv.VmSpecByName("lab-vm-harbor", "harbor-target")
+	if !ok {
+		t.Fatal("mock did not retain Harbor VM create payload")
+	}
+	if spec.Image != "" {
+		t.Fatalf("catalog image must be omitted, got %q", spec.Image)
+	}
+	if spec.HarborArtifactID != artifactID {
+		t.Fatalf("harbor_artifact_id=%q, want %q", spec.HarborArtifactID, artifactID)
+	}
+	if got := stateString(t, resp.State, "harbor_artifact_id"); got != artifactID {
+		t.Fatalf("state harbor_artifact_id=%q, want %q", got, artifactID)
+	}
 }
 
 func stateBool(t *testing.T, state tfsdk.State, attr string) bool {
@@ -300,6 +643,7 @@ func TestUnitVmCreateHonorsTimeoutsBlock(t *testing.T) {
 	resp := runVmCreate(t, r, s, vmValue(t, s, vmCreateAttrs(envID, map[string]tftypes.Value{
 		"timeouts": tftypes.NewValue(timeoutsType, map[string]tftypes.Value{
 			"create": tftypes.NewValue(tftypes.String, "50ms"),
+			"update": tftypes.NewValue(tftypes.String, nil),
 			"delete": tftypes.NewValue(tftypes.String, nil),
 		}),
 	})))
@@ -367,6 +711,58 @@ func TestUnitVmUpdateTogglesPower(t *testing.T) {
 	}
 	if got := stateString(t, updResp2.State, "status"); got != "active" {
 		t.Fatalf("expected status active after power start, got %q", got)
+	}
+}
+
+func TestUnitVmUpdateHonorsLivePowerTimeout(t *testing.T) {
+	srv := mockapi.New(unitToken)
+	defer srv.Close()
+	srv.VmReadyAfterGETs = 1
+	envID := unitEnv(t, srv, "lab-vm-unit-power-timeout")
+	r := newUnitVmResource(t, srv)
+	s := vmSchema(t, r)
+
+	created := runVmCreate(
+		t,
+		r,
+		s,
+		vmValue(t, s, vmCreateAttrs(envID, nil)),
+	)
+	if created.Diagnostics.HasError() {
+		t.Fatalf("create: %v", created.Diagnostics)
+	}
+	vmID := stateString(t, created.State, "id")
+	srv.VmStatusOverride = &mockapi.VmStatus{Phase: "Running"}
+
+	objType := s.Type().TerraformType(context.Background()).(tftypes.Object)
+	timeoutsType := objType.AttributeTypes["timeouts"].(tftypes.Object)
+	planRaw := vmValue(t, s, vmCreateAttrs(envID, map[string]tftypes.Value{
+		"id":      tftypes.NewValue(tftypes.String, vmID),
+		"running": tftypes.NewValue(tftypes.Bool, false),
+		"timeouts": tftypes.NewValue(timeoutsType, map[string]tftypes.Value{
+			"create": tftypes.NewValue(tftypes.String, nil),
+			"update": tftypes.NewValue(tftypes.String, "50ms"),
+			"delete": tftypes.NewValue(tftypes.String, nil),
+		}),
+	}))
+	updResp := resource.UpdateResponse{
+		State: tfsdk.State{Schema: s, Raw: created.State.Raw},
+	}
+
+	start := time.Now()
+	r.Update(context.Background(), resource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: s, Raw: planRaw},
+		State: created.State,
+	}, &updResp)
+
+	if !updResp.Diagnostics.HasError() {
+		t.Fatal("expected a live power-state timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("configured update timeout (50ms) was not honored, took %s", elapsed)
+	}
+	if !strings.Contains(updResp.Diagnostics.Errors()[0].Detail(), "last live phase") {
+		t.Fatalf("expected observed phase in timeout diagnostic: %v", updResp.Diagnostics)
 	}
 }
 

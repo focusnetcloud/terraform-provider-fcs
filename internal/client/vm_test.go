@@ -248,6 +248,34 @@ func TestPowerVmFlipsStatus(t *testing.T) {
 	}
 }
 
+func TestGetVmStatusReadsLivePowerPhase(t *testing.T) {
+	srv := mockapi.New(testToken)
+	defer srv.Close()
+	srv.VmReadyAfterGETs = 1
+	c := newTestClient(t, srv.URL, testToken)
+	envID := newEnvForVms(t, c, "lab-vm-live-status")
+
+	vm, err := c.CreateVm(
+		context.Background(),
+		envID,
+		client.VmSpec{Image: "ubuntu-22.04"},
+	)
+	if err != nil {
+		t.Fatalf("CreateVm: %v", err)
+	}
+	if _, err := c.GetVm(context.Background(), envID, vm.ID); err != nil {
+		t.Fatalf("GetVm: %v", err)
+	}
+
+	status, err := c.GetVmStatus(context.Background(), envID, vm.ID)
+	if err != nil {
+		t.Fatalf("GetVmStatus: %v", err)
+	}
+	if status.Phase != "Running" || status.PlatformError {
+		t.Fatalf("expected live Running status, got %+v", status)
+	}
+}
+
 func TestPowerVmInvalidAction422(t *testing.T) {
 	srv := mockapi.New(testToken)
 	defer srv.Close()

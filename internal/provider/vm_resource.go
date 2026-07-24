@@ -10,6 +10,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
@@ -35,11 +36,14 @@ import (
 // defaultVmCreateTimeout covers POST + poll-to-ready (status=active for
 // running VMs, stopped for running=false): image import + first boot.
 const defaultVmCreateTimeout = 15 * time.Minute
+const defaultVmUpdateTimeout = 5 * time.Minute
 
 var (
-	_ resource.Resource               = (*vmResource)(nil)
-	_ resource.ResourceWithConfigure  = (*vmResource)(nil)
-	_ resource.ResourceWithModifyPlan = (*vmResource)(nil)
+	_ resource.Resource                   = (*vmResource)(nil)
+	_ resource.ResourceWithConfigure      = (*vmResource)(nil)
+	_ resource.ResourceWithImportState    = (*vmResource)(nil)
+	_ resource.ResourceWithModifyPlan     = (*vmResource)(nil)
+	_ resource.ResourceWithValidateConfig = (*vmResource)(nil)
 )
 
 // NewVmResource returns the fcs_vm resource.
@@ -61,7 +65,10 @@ func (r *vmResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp 
 		Description: "A standalone VM in the persistent tenant network, brokered by the FCS " +
 			"API. Create is asynchronous: the provider polls " +
 			"until the VM reaches its desired power state. All attributes except `running` " +
-			"force replacement.",
+			"force replacement. After a create timeout, verify the VM through the API: " +
+			"untaint a healthy tracked VM and import only when it is absent from state. " +
+			"Because the API never returns cloud-init payloads, imported VMs that originally " +
+			"used cloud-init must ignore changes to those sensitive attributes.",
 		Attributes: map[string]schema.Attribute{
 			"environment_id": schema.StringAttribute{
 				Required: true,
@@ -75,11 +82,24 @@ func (r *vmResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp 
 				},
 			},
 			"image": schema.StringAttribute{
-				Required: true,
+				Optional: true,
 				Description: "Catalog image name (see the fcs_images data source). " +
-					"Changing it forces a new VM.",
+					"Exactly one of image or harbor_artifact_id must be set. Changing it " +
+					"forces a new VM.",
 				Validators: []validator.String{
 					stringvalidator.LengthAtLeast(1),
+				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
+			},
+			"harbor_artifact_id": schema.StringAttribute{
+				Optional: true,
+				Description: "ID of an active fcs_harbor_artifact with kind vm_disk. The API " +
+					"imports its digest-pinned OCI artifact through CDI. Exactly one of image " +
+					"or harbor_artifact_id must be set. Changing it forces a new VM.",
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(uuidPattern, "must be a canonical UUID"),
 				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
@@ -217,11 +237,37 @@ func (r *vmResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp 
 				Create: true,
 				CreateDescription: fmt.Sprintf("How long to wait for the VM to reach its desired power state "+
 					"(default %s). Accepts a duration string such as \"30m\".", defaultVmCreateTimeout),
+				Update: true,
+				UpdateDescription: fmt.Sprintf("How long to wait for an in-place stop/start to reach its "+
+					"observed KubeVirt power state (default %s). If an update times out, verify the live "+
+					"VM status before retrying because the accepted operation may still converge.",
+					defaultVmUpdateTimeout),
 				Delete: true,
 				DeleteDescription: fmt.Sprintf("How long to wait for the teardown to finish (GET returns 404 "+
 					"or status=destroyed; default %s).", defaultDeleteTimeout),
 			}),
 		},
+	}
+}
+
+// ValidateConfig mirrors the API's exact-one source invariant at plan time.
+// Unknown values are deferred because Terraform may resolve them from another
+// resource during apply.
+func (r *vmResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var image, harborArtifactID types.String
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("image"), &image)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("harbor_artifact_id"), &harborArtifactID)...)
+	if resp.Diagnostics.HasError() || image.IsUnknown() || harborArtifactID.IsUnknown() {
+		return
+	}
+	imageSet := !image.IsNull()
+	artifactSet := !harborArtifactID.IsNull()
+	if imageSet == artifactSet {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("image"),
+			"Invalid VM image source",
+			"Exactly one of image or harbor_artifact_id must be configured.",
+		)
 	}
 }
 
@@ -263,12 +309,13 @@ func (r *vmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 
 func (r *vmResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var envID string
-	var name, image, nicNetwork, vdcID, networkID, userdata, networkdata types.String
+	var name, image, harborArtifactID, nicNetwork, vdcID, networkID, userdata, networkdata types.String
 	var cpuCores, memoryGB, diskGB types.Int64
 	var running types.Bool
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("environment_id"), &envID)...)
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("name"), &name)...)
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("image"), &image)...)
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("harbor_artifact_id"), &harborArtifactID)...)
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("cpu_cores"), &cpuCores)...)
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("memory_gb"), &memoryGB)...)
 	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("disk_gb"), &diskGB)...)
@@ -302,6 +349,7 @@ func (r *vmResource) Create(ctx context.Context, req resource.CreateRequest, res
 	runVal := running.ValueBool()
 	spec := client.VmSpec{
 		Image:                image.ValueString(),
+		HarborArtifactID:     harborArtifactID.ValueString(),
 		Name:                 name.ValueString(), // empty: server generates one
 		CPUCores:             cpuCores.ValueInt64(),
 		MemoryGB:             memoryGB.ValueInt64(),
@@ -365,11 +413,15 @@ func (r *vmResource) Create(ctx context.Context, req resource.CreateRequest, res
 
 func (r *vmResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var envID, id string
+	var stateImage, stateHarborArtifactID types.String
 	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("environment_id"), &envID)...)
 	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("id"), &id)...)
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("image"), &stateImage)...)
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("harbor_artifact_id"), &stateHarborArtifactID)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	importRead := stateImage.IsNull() && stateHarborArtifactID.IsNull()
 
 	vm, err := r.client.GetVm(ctx, envID, id)
 	if err != nil {
@@ -391,6 +443,23 @@ func (r *vmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 		return
 	}
 
+	if importRead && !vmHasSpecReadback(vm) {
+		resp.Diagnostics.AddError(
+			"FCS API does not support lossless VM import",
+			"The VM exists, but this FCS API response does not include the non-secret VM "+
+				"specification required to reconstruct Terraform state. Upgrade the FCS API "+
+				"before importing this VM; the provider refuses to create a replacement-prone "+
+				"partial state.",
+		)
+		return
+	}
+
+	if vmHasSpecReadback(vm) {
+		setVmReadState(ctx, &resp.State, vm, &resp.Diagnostics)
+		return
+	}
+	// Backward compatibility for already-managed resources against an older
+	// API: refresh only observed fields and preserve the existing config.
 	setVmState(ctx, &resp.State, vm, &resp.Diagnostics)
 }
 
@@ -408,6 +477,17 @@ func (r *vmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 	}
 
 	if !planRunning.Equal(stateRunning) {
+		var timeoutsVal timeouts.Value
+		resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("timeouts"), &timeoutsVal)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		updateTimeout, diags := timeoutsVal.Update(ctx, defaultVmUpdateTimeout)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
 		action := "stop"
 		if planRunning.ValueBool() {
 			action = "start"
@@ -416,6 +496,21 @@ func (r *vmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 			resp.Diagnostics.AddError(
 				"Could not update fcs_vm power state",
 				fmt.Sprintf("POST /v1/environments/%s/vms/%s/power (action=%s) failed: %s", envID, id, action, err),
+			)
+			return
+		}
+		if _, err := waitForVmPowerState(
+			ctx,
+			r.client,
+			envID,
+			id,
+			planRunning.ValueBool(),
+			r.pollInterval,
+			updateTimeout,
+		); err != nil {
+			resp.Diagnostics.AddError(
+				"fcs_vm power update did not settle",
+				fmt.Sprintf("VM %s in environment %s: %s", id, envID, err),
 			)
 			return
 		}
@@ -472,11 +567,28 @@ func (r *vmResource) Delete(ctx context.Context, req resource.DeleteRequest, res
 	}
 }
 
-// setVmState writes the computed contract fields of a Vm into the state.
-// Configurable attributes (environment_id, image, sizing, cloud-init,
-// running, timeouts) stay at their planned/stated values — the read
-// endpoint does not return them. Empty vm_ip/console_url become null
-// (the server returns null until they exist).
+// ImportState adopts a VM by its environment-scoped identity. VM IDs are not
+// globally sufficient for the API path, so imports use
+// <environment_id>/<vm_id> rather than a bare VM UUID.
+func (r *vmResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	parts := strings.Split(strings.TrimSpace(req.ID), "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		resp.Diagnostics.AddError(
+			"Invalid fcs_vm import ID",
+			"Expected <environment_id>/<vm_id>, for example "+
+				"11111111-2222-4333-8444-555555555555/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.",
+		)
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("environment_id"), strings.TrimSpace(parts[0]))...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), strings.TrimSpace(parts[1]))...)
+}
+
+// setVmState writes only server-observed fields. Configurable attributes stay
+// at their planned/stated values, which is required during Create and Update:
+// a server-normalized response must not produce an inconsistent apply result.
+// Empty vm_ip/console_url become null.
 func setVmState(ctx context.Context, state *tfsdk.State, vm *client.Vm, diags *diag.Diagnostics) {
 	diags.Append(state.SetAttribute(ctx, path.Root("id"), vm.ID)...)
 	diags.Append(state.SetAttribute(ctx, path.Root("status"), vm.Status)...)
@@ -490,4 +602,60 @@ func setVmState(ctx context.Context, state *tfsdk.State, vm *client.Vm, diags *d
 		consoleURL = types.StringValue(vm.ConsoleURL)
 	}
 	diags.Append(state.SetAttribute(ctx, path.Root("console_url"), consoleURL)...)
+}
+
+// vmHasSpecReadback identifies the additive API contract that returns the
+// non-secret VM specification. Required scalar pointers distinguish a new
+// response from an older response; nullable vDC bindings may legitimately be
+// absent.
+func vmHasSpecReadback(vm *client.Vm) bool {
+	return vm.CPUCores != nil &&
+		vm.MemoryGB != nil &&
+		vm.DiskGB != nil &&
+		vm.NICNetwork != nil &&
+		vm.Running != nil
+}
+
+// setVmReadState refreshes configurable, non-secret fields from a complete API
+// readback. Cloud-init and timeouts deliberately remain state/config-only.
+func setVmReadState(ctx context.Context, state *tfsdk.State, vm *client.Vm, diags *diag.Diagnostics) {
+	setVmState(ctx, state, vm, diags)
+	if vm.Name != "" {
+		diags.Append(state.SetAttribute(ctx, path.Root("name"), vm.Name)...)
+	}
+
+	switch {
+	case vm.HarborArtifactID != "" && vm.Image == "":
+		diags.Append(state.SetAttribute(ctx, path.Root("image"), types.StringNull())...)
+		diags.Append(state.SetAttribute(ctx, path.Root("harbor_artifact_id"), vm.HarborArtifactID)...)
+	case vm.Image != "" && vm.HarborArtifactID == "":
+		diags.Append(state.SetAttribute(ctx, path.Root("image"), vm.Image)...)
+		diags.Append(state.SetAttribute(ctx, path.Root("harbor_artifact_id"), types.StringNull())...)
+	default:
+		diags.AddError(
+			"Invalid VM image source returned by FCS API",
+			"Expected exactly one of image or harbor_artifact_id in the VM read response.",
+		)
+		return
+	}
+
+	diags.Append(state.SetAttribute(ctx, path.Root("cpu_cores"), *vm.CPUCores)...)
+	diags.Append(state.SetAttribute(ctx, path.Root("memory_gb"), *vm.MemoryGB)...)
+	diags.Append(state.SetAttribute(ctx, path.Root("disk_gb"), *vm.DiskGB)...)
+	diags.Append(state.SetAttribute(ctx, path.Root("nic_network"), *vm.NICNetwork)...)
+	diags.Append(state.SetAttribute(ctx, path.Root("running"), *vm.Running)...)
+
+	switch {
+	case vm.VdcID == nil && vm.NetworkID == nil:
+		diags.Append(state.SetAttribute(ctx, path.Root("vdc_id"), types.StringNull())...)
+		diags.Append(state.SetAttribute(ctx, path.Root("network_id"), types.StringNull())...)
+	case vm.VdcID != nil && vm.NetworkID != nil:
+		diags.Append(state.SetAttribute(ctx, path.Root("vdc_id"), *vm.VdcID)...)
+		diags.Append(state.SetAttribute(ctx, path.Root("network_id"), *vm.NetworkID)...)
+	default:
+		diags.AddError(
+			"Invalid VM network binding returned by FCS API",
+			"Expected vdc_id and network_id to be both null or both set in the VM read response.",
+		)
+	}
 }
